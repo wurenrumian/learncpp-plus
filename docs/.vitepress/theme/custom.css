@@ -1,0 +1,19 @@
+/* 站点级样式：Pele 主题变量在 pele.css（W2）里定义。 */
+
+.vp-doc {
+  line-height: 1.75;
+}
+
+.vp-doc p,
+.vp-doc li {
+  text-wrap: pretty;
+}
+
+.vp-doc figure {
+  margin: 1.5rem 0;
+}
+
+.vp-doc table {
+  display: table;
+  width: 100%;
+}

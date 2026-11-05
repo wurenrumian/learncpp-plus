@@ -1,0 +1,10 @@
+# ./tmp —— 过程性记忆，默认不进版本库（整个目录）
+/tmp/
+
+# 依赖与构建产物
+node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+
+# verify 脚本生成
+docs/public/verify-report.json

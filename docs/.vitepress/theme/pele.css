@@ -1,0 +1,56 @@
+/* Pele 图块：颜色全部走 VitePress 变量，暗色模式不需要重新渲染。 */
+.pele-figure {
+  --pele-font: var(--vp-font-family-base);
+  --pele-font-mono: var(--vp-font-family-mono);
+  --pele-bg: var(--vp-c-bg-soft);
+  --pele-fg: var(--vp-c-text-1);
+  --pele-fg-on-light: var(--vp-c-text-1);
+  --pele-fg-on-dark: var(--vp-c-bg);
+  --pele-muted: var(--vp-c-text-2);
+  --pele-line: var(--vp-c-text-2);
+  --pele-surface: var(--vp-c-bg-alt);
+  --pele-surface-alt: var(--vp-c-bg-soft);
+  --pele-border: var(--vp-c-divider);
+  --pele-accent: var(--vp-c-brand-1);
+  --pele-critical: var(--vp-c-danger-1);
+  --pele-error: var(--vp-c-danger-1);
+
+  margin: 1.75rem 0;
+  padding: 1rem;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 10px;
+  background: var(--vp-c-bg-soft);
+  overflow-x: auto;
+}
+
+.pele-canvas {
+  display: flex;
+  min-height: 120px;
+  align-items: center;
+  justify-content: center;
+}
+
+.pele-canvas:empty::before {
+  content: '正在渲染图…';
+  color: var(--vp-c-text-3);
+  font-size: 0.85rem;
+}
+
+.pele-canvas svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.pele-canvas.pele-error {
+  color: var(--vp-c-danger-1);
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}
+
+.pele-figure figcaption {
+  margin-top: 0.75rem;
+  color: var(--vp-c-text-3);
+  font-size: 0.85rem;
+  text-align: center;
+}
