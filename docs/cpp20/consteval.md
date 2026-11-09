@@ -9,6 +9,8 @@ description: 分清 constexpr 的"可以编译期算"、consteval 的"必须编�
 
 ## 动机：`constexpr` 说的是"可以"，不是"必须"
 
+这一节讲两个动机：编译期校验落不到实处，以及静态初始化没有顺序保证。前者引出 `consteval`，后者引出 `constinit`。
+
 写下一个 `constexpr` 函数，只代表它**允许**出现在常量表达式里。它照样可以在运行期被调用，编译器也没有义务替你算：
 
 ```cpp
@@ -20,7 +22,7 @@ int main(int argc, char** argv) {
 }
 ```
 
-于是"编译期校验"变成了一个愿望。你希望 tag 名字写错时编译失败，但只要调用点不是常量表达式，错误就会被推迟到运行期，`static_assert` 也帮不上忙 —— 它只能断言它自己那一行里的常量表达式。
+于是"编译期校验"变成了愿望。tag 名字写错时，你希望编译失败；但只要调用点不是常量表达式，错误就推迟到运行期。`static_assert` 也帮不上忙，它只能断言自己那一行里的常量表达式。
 
 想堵死运行期这条路，就得换成立即函数：
 
@@ -45,7 +47,7 @@ extern int g_total;
 int g_doubled = g_total * 2;     // 可能读到 0，也可能读到算好的值
 ```
 
-这就是 static initialization order fiasco。`constinit` 要求初始化器是常量表达式，于是初始化被挪进数据段，压根没有"顺序"可言。
+这就是 static initialization order fiasco。`constinit` 要求初始化器是常量表达式，于是初始化被挪进数据段，根本没有"顺序"可言。
 
 三个关键字回答三个不同问题，选错的典型症状是：该编译期失败的没失败（用了 `constexpr`），或者运行期该改的改不了（用了 `consteval`），或者顺序问题依旧（忘了 `constinit`）。
 
@@ -69,7 +71,7 @@ constexpr twice(21) runtime   = 42
 constexpr twice(21) compile   = 42
 ```
 
-这份程序里每样东西各司其职：
+这份程序里五样东西各司其职：
 
 - `fnv1a` 是 `constexpr` 函数，所以它既能被 `const_hash` 在编译期调用，也能在 `main` 里用运行期数据再跑一遍，两行输出的哈希值必须相同。
 - `const_hash` 是 `consteval`，`learncpp_hash` 的初始化器必须能在编译期求值，`static_assert` 因此是真正的编译期校验，而不是事后自查。
@@ -83,7 +85,11 @@ constexpr twice(21) compile   = 42
 
 ## 机制与语义
 
+这一节分五块：先用一张表把三者摆在一起，再逐个展开 `consteval`、`constinit` 和 `if consteval`，最后看它们怎么组合。
+
 ### 三者对照表
+
+三者的差别集中在四个维度：能不能在运行期使用、要不要常量表达式、作用在什么对象上、典型用途是什么。
 
 | | `constexpr` | `consteval` | `constinit` |
 | --- | --- | --- | --- |
@@ -109,9 +115,11 @@ flowchart TB
     D --> D1[顺序由链接器决定]
 ```
 
+这张图只做初筛：第一问是结果要不要在编译期拿到，第二问是要不要禁止运行期调用；每一支的具体边界在下面三小节展开。
+
 ### `consteval`：立即函数
 
-带 `consteval` 的函数叫**立即函数**（immediate function）。它不是"更严格的 constexpr 函数"，而是另一类东西：每次调用都是一个立即调用（immediate invocation），必须在常量求值里完成。
+带 `consteval` 的函数叫**立即函数**（immediate function）。它每次调用都是一个立即调用（immediate invocation），必须在常量求值里完成；这一点和 `constexpr` 函数不同，后者允许退回运行期。
 
 它因此可以出现在任何要求常量表达式的位置，而且失败会直接变成编译错误：
 
@@ -161,6 +169,8 @@ int main() {
 这两条不是 `consteval` 专属，`constexpr` 函数的常量求值同样受限；但立即函数没有"退回运行期"这个选项，所以撞上限制就是硬错误。GCC 有 `-fconstexpr-depth` / `-fconstexpr-loop-limit` 一类开关，本机没装 GCC，名字与行为未验证。
 
 ### `constinit`：只保证"初始化发生在编译期"
+
+`constinit` 管的是"初始化发生在什么时候"，不是变量的可变性；这是本节最容易被名字带偏的一点。先看它允许作用在哪些变量上。
 
 `constinit` 只能修饰**静态存储期**的变量：命名空间作用域的变量、函数里的 `static` 局部变量、类的 `static` 数据成员，以及 `thread_local`（实测后者也接受）。写成普通局部变量是硬错误：
 
@@ -253,7 +263,7 @@ constexpr unsigned hash_of(std::string_view text) {
 
 ### 组合：编译期哈希 + 运行期计数器
 
-最小示例已经把这四件事串起来了，值得单独拆开看它的结构：
+最小示例的代码就是这四件事的组合，拆开看每部分承担什么：
 
 1. **算法只写一份**。`fnv1a` 是 `constexpr`，编译期和运行期都能调，避免"编译期版本"和"运行期版本"算出不同结果 —— 这是手写两份实现最常见的 bug。
 2. **编译期闸门用 `consteval` 包一层**。`const_hash` 本身没有新逻辑，它的作用是让"在运行期调用"变成编译错误；`learncpp_hash` 的初始化因此成为真正的校验点。
@@ -263,6 +273,8 @@ constexpr unsigned hash_of(std::string_view text) {
 一个常见变体是"编译期生成表、运行期查表"：用 `consteval` 造出 `std::array`，再用 `constinit` 或 `constexpr` 保存。表本身是常量，查表函数可以是普通函数。
 
 ## 常见坑
+
+八条坑里，第一条讲 `constexpr` 的 ODR-use，第二、三条是 `consteval` 的边界，第四、五条是 `constinit` 的限制，最后三条属于 `if consteval`、编译期 `new` 和编译器差异。
 
 ### 1. `constexpr` 变量被 ODR-use 时需要定义
 
@@ -331,7 +343,7 @@ constexpr int leak() {
 static_assert(leak() == 5);   // 错：allocation performed here was not deallocated
 ```
 
-本机 clang 23 的报错正是 `static assertion expression is not an integral constant expression`，附注 `allocation performed here was not deallocated`。这条错误不代表编译期不能用容器：libc++ 23 上 `std::vector` 在常量求值里可用（在同一求值里分配、扩容量、释放），我实测过 `constexpr` 函数里 `push_back` 后返回 `size()`。它只要求你**不要漏掉释放**，所以手写指针的编译期代码最容易踩。
+本机 clang 23 的报错正是 `static assertion expression is not an integral constant expression`，附注 `allocation performed here was not deallocated`。这条错误不代表编译期不能用容器：libc++ 23 上 `std::vector` 在常量求值里可用（在同一求值里分配、扩容量、释放），我实测过 `constexpr` 函数里 `push_back` 后返回 `size()`。它只要求你**不要漏掉释放**，所以手写指针的编译期代码，每一处 `new` 都要找到对应的 `delete`。
 
 ### 8. 编译器的实现差异
 
@@ -371,6 +383,8 @@ learncpp 讲作用域、存储期和全局变量时提到过 static initializati
 这三块内容和 learncpp 是接续关系，不是替代关系：`constexpr` 的基础仍然要打牢，本页只是把"may / must / when / which world"这四件事分开。同属 C++20 的 [concepts 与 requires](/cpp20/concepts) 常常和 `consteval` 配合（用 concept 描述"这组实参能算出常量"），而 [ranges 与 views](/cpp20/ranges) 通常出现在 `if consteval` 的运行期分支里。
 
 ## 小练习
+
+五个练习依次摸边界、验证分叉、复现顺序问题、撞限制、换写法：
 
 1. **给哈希加"编译期白名单"**：写一个 `consteval bool is_known_tag(std::string_view)`，用 `static_assert` 拒绝未知 tag。然后故意在调用点传一个运行期 `std::string`，观察报错停在哪一行。
 2. **两份实现，一个结果**：给 FNV-1a 写一个运行期版本（可以加边界检查），用 `if consteval` 分叉，验证两条路径的哈希值一致。接着故意让运行期版本算错，看 `static_assert` 能不能发现 —— 解释为什么不能。

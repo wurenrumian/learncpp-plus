@@ -5,15 +5,17 @@ description: "std::span 用「指针 + 长度」表示一段连续内存而不�
 
 # std::span 与 std::mdspan：不拥有数据的视图
 
-如果你想写一个函数把一段 `int` 求和，C++ 长期以来只给两个都不顺手的选项：`sum(const int* p, int n)`，或者 `sum(const std::vector<int>& v)`。前者让指针和长度各走各的，后者把函数绑死在某一个容器类型上。C++20 的 `std::span` 补上中间这层：一个指针加一个长度，谁传进来都行，**不复制、不拥有、不检查**。
+想把一段 `int` 求和，C++ 长期以来只给两个都不顺手的选项：`sum(const int* p, int n)`，或者 `sum(const std::vector<int>& v)`。前者让指针和长度各走各的，后者把函数绑死在某一个容器类型上。C++20 的 `std::span` 补上中间这层：一个指针加一个长度，谁传进来都行，不复制、不拥有、不检查。
 
-C++23 的 `std::mdspan` 把同一个模型推广到多维：它还是"指针 + 形状"，只是形状变成 `extents`，并且明确写出"多维下标怎么换算成内存偏移"这件事——这就是 `layout`。
+C++23 的 `std::mdspan` 把同一个模型推广到多维。它还是"指针 + 形状"，只是形状变成 `extents`，并且明确写出"多维下标怎么换算成内存偏移"，这就是 `layout`。
 
-这一页讲三件事：span 到底存了什么、静态 extent 与子视图的取舍、mdspan 的 layout 为什么会改变你读到的数据。完整可编译的例子是 `docs/snippets/stdlib/span-mdspan.cpp`，下面引进来的就是它；其余代码块都是示意片段。
+这一页围绕三件事展开：span 到底存了什么、静态 extent 与子视图怎么取舍、mdspan 的 layout 为什么会改变你读到的数据。第三件最难，因为布局错了不会报错，只会让你读到别的元素。完整可编译的例子是 `docs/snippets/stdlib/span-mdspan.cpp`，下面引进来的就是它；其余代码块都是示意片段。
 
 ## 动机
 
-先看三种传参方式的差别。它们都能把"一段 `int`"交出去，代价完全不同：
+这一节回答一个问题：C 风格接口和容器引用都能用，span 到底补上了哪一块。先看四种传参方式的代价对照，再走三个具体痛点。
+
+它们都能把"一段 `int`"交出去，代价完全不同：
 
 | 方式 | 函数签名 | 长度 | 容器类型 | 子区间 |
 | --- | --- | --- | --- | --- |
@@ -28,9 +30,11 @@ C++23 的 `std::mdspan` 把同一个模型推广到多维：它还是"指针 + �
 2. **C 数组一进函数就丢长度。** 数组退化成指针是第 17 章的核心内容：`void f(int a[])` 里的 `a` 就是个 `int*`，`sizeof(a)` 是指针大小。长度只能由调用方额外传，于是回到第 1 点。
 3. **容器引用把函数焊死在容器上。** `const std::vector<int>&` 收不了 `std::array`、收不了 C 数组、收不了 `vector` 的一段前缀，也收不了 `vector<short>`（即便每个元素都能转成 `int`）。为每种来源写一个重载，最后会变成一堆一行函数。
 
-`std::span<const int>` 一个参数解决三条：长度跟着指针一起走，任何连续存储都能隐式转进来，子区间是 O(1) 的视图。
+三条痛点同源：长度和指针是两个独立的值，类型系统不知道它们属于同一段内存。`std::span<const int>` 一个参数解决三条——长度跟着指针一起走，任何连续存储都能隐式转进来，子区间是 O(1) 的视图。下一节看它落到代码上是什么样。
 
 ## 最小示例
+
+先跑一遍完整程序，建立"输入几个、输出几段"的对应关系；机制的细节留到后面几节。
 
 <<< @/snippets/stdlib/span-mdspan.cpp
 
@@ -42,30 +46,32 @@ clang++ -std=c++23 -Wall -Wextra -O0 -fno-diagnostics-color docs/snippets/stdlib
 
 输出分四段，每段对应代码里一个编号：
 
-| 输出段 | 演示的内容 | 值得注意的地方 |
+| 输出段 | 演示的内容 | 注意点 |
 | --- | --- | --- |
 | `one function, three sources` | 一个 `sum(std::span<const int>)` 同时收 C 数组、`std::array`、`std::vector` | 三行都是隐式转换，没有一处写容器类型 |
 | `forwarding to a C api` | `fill(std::span<int>)` 转发给 `fill_c(int*, size_t)` | 长度从 `s.size()` 来，不会和指针走散 |
 | `subviews` | `first` / `last` / 运行期 `subspan` / 编译期 `subspan<1, 3>` | `static 3` 与 `static 2` 两行的 span 类型里带着长度 |
 | `mdspan 3x4` | 同一块 12 个 `int` 用 `layout_right` 写、用 `layout_left` 读 | 两次求和都是 138，但读出来的矩阵完全不同 |
 
-最后一段是这一页的重点。两个 mdspan 指向同一块 `storage`：
+最后一段是这一页的重点，先在这里把现象摆出来。两个 mdspan 指向同一块 `storage`：
 
 - `layout_right` 的行优先步长是 `4 1`，`right[1, 0]` 落在偏移 4 上，值是 10。
 - `layout_left` 的列优先步长是 `1 3`，`left[0, 1]` 落在偏移 3 上，值是 3。
 
-它们读的是同一块内存，`left[0, 1]` 和 `right[1, 0]` 却拿到不同的元素——**换 layout 换的是索引到偏移的公式，不是数据**。
+它们读的是同一块内存，`left[0, 1]` 和 `right[1, 0]` 却拿到不同的元素。换 layout 换的是索引到偏移的公式，不是数据；为什么会这样，第六个坑里展开。
 
 页内其余代码块都是说明性片段，只有上面这份文件经过 `npm run verify` 的编译与输出比对。
 
 ## 机制与语义
 
+这一节拆五块：span 的存储模型、构造来源、静态 extent 的收益、子视图、mdspan 的 shape 与 layout。前四块都在同一层做加法，第五块换了索引模型。
+
 ### span 就是指针加长度
 
-`std::span<T, Extent>` 的全部状态就是"指向首元素的指针 + 长度"（静态 extent 时长度在类型里，见下）。它没有所有权，析构函数什么都不做：
+先看它存什么。`std::span<T, Extent>` 的全部状态就是"指向首元素的指针 + 长度"，静态 extent 时长度在类型里（见后文）。它没有所有权，析构函数什么都不做，由此推出一条链：拷贝是浅拷贝，复制 span 只是复制指针和长度，两个 span 指着同一块内存，`s1[0] = 5` 会让 `s2[0]` 也变成 5；它也不延长生命周期，指向的容器析构之后 span 还在，那就是一段悬垂的视图。
 
-- **拷贝是浅拷贝**：复制一个 span 只是复制指针和长度，两个 span 指着同一块内存，`s1[0] = 5` 会让 `s2[0]` 也变成 5。
-- **不延长生命周期**：span 指向的容器析构了，span 还在，它就是一段悬垂的视图。
+剩下三条是最常被问到的性质：
+
 - **`size()` 不是 `sizeof`**：`s.size()` 是元素个数，`s.size_bytes()` 才是字节数；`sizeof(s)` 是 span 对象本身的大小。最小示例里那两行 `true` 就是在确认这件事：`sizeof(std::span<int>)` 等于指针加 `size_t`，跟元素个数无关。
 - **`span<const T>` 是只读视图**：从 `span<int>` 转过去是隐式的，反过来不行。本机实测 `std::span<int> back = cs;`（`cs` 是 `span<const int>`）的报错是：
 
@@ -77,7 +83,7 @@ clang++ -std=c++23 -Wall -Wextra -O0 -fno-diagnostics-color docs/snippets/stdlib
 
 ### 构造来源
 
-`span` 的构造函数覆盖了所有"连续 + 长度已知"的东西：
+上一块讲的是 span 存了什么，这一块讲它从哪儿来。构造函数覆盖了所有"连续 + 长度已知"的来源，一处来源对应一种 extent：
 
 | 来源 | 写法 | 得到的 extent |
 | --- | --- | --- |
@@ -91,12 +97,14 @@ clang++ -std=c++23 -Wall -Wextra -O0 -fno-diagnostics-color docs/snippets/stdlib
 
 两个容易卡住的细节：
 
-- **从容器隐式转换只在 extent 是动态时才成立**。`std::span<int, 4> s{vec}` 的构造函数是 `explicit` 的，所以 `f(vec)` 这种隐式转换不成立（本机报 `no known conversion from 'std::vector<int>' to 'std::span<int, 4>'`），得写 `f(std::span<int, 4>{vec})`。长度是否正好 4，默认编译期**没人检查**，只有开了 hardening 才在构造处断言。
+- **从容器隐式转换只在 extent 是动态时才成立**。`std::span<int, 4> s{vec}` 的构造函数是 `explicit` 的，所以 `f(vec)` 这种隐式转换不成立（本机报 `no known conversion from 'std::vector<int>' to 'std::span<int, 4>'`），得写 `f(std::span<int, 4>{vec})`。长度是否正好 4，默认编译期没人检查，只有开了 hardening 才在构造处断言。
 - **迭代器对那个构造函数在 C++20 里要求 `contiguous_iterator`**。`std::list`、`std::deque` 的前后两个迭代器塞不进去，这是好事：span 的前提就是内存必须连续。
+
+两条都指向同一件事：extent 一旦进了类型，构造就变成一次长度承诺；承诺对不对，默认由你自己负责。
 
 ### `dynamic_extent` 与静态 extent
 
-`std::span<int>` 的全名是 `std::span<int, std::dynamic_extent>`，`dynamic_extent` 是一个哨兵值，意思是"长度是运行期数据"。反过来，`std::span<int, 4>` 把 4 写进了类型。
+既然构造时可以选择把长度写进类型，就得说清写与不写各买到了什么。`std::span<int>` 的全名是 `std::span<int, std::dynamic_extent>`，`dynamic_extent` 是一个哨兵值，意思是"长度是运行期数据"。反过来，`std::span<int, 4>` 把 4 写进了类型。
 
 | | `std::span<int>` | `std::span<int, 4>` |
 | --- | --- | --- |
@@ -118,7 +126,7 @@ error: static assertion failed due to requirement '3ULL <= 2ULL': span<T, N>::fi
 
 ### 子视图：`first` / `last` / `subspan`
 
-这几个成员都是 O(1)：它们只调整指针和长度，不复制元素，返回的 span 和源共享内存。
+子视图有三个入口，区别只在用运行期值还是常量表达式。共同点是 O(1)：它们只调整指针和长度，不复制元素，返回的 span 和源共享内存。
 
 | 调用 | 返回 | 说明 |
 | --- | --- | --- |
@@ -133,7 +141,7 @@ error: static assertion failed due to requirement '3ULL <= 2ULL': span<T, N>::fi
 
 ### mdspan：形状与布局分开写
 
-`std::mdspan<T, Extents, Layout, Accessor>` 比 span 多两样东西：
+这一小节是整页最费解的部分，难在 layout 错了不报错。先记住一个分工：`Extents` 管"每维多长"，`Layout` 管"哪个维度挨着"，两者一起把多维下标换算成偏移。`std::mdspan<T, Extents, Layout, Accessor>` 比 span 多出来的就是这两样：
 
 - **`Extents`** 描述形状。`std::extents<std::size_t, 3, 4>` 是编译期固定的 3 行 4 列；`std::dextents<std::size_t, 2>` 只固定"两维"，每维长度在构造时给。
 - **`Layout`** 描述"多维下标怎么换算成偏移"。默认 `std::layout_right`（行优先，最后一维步长 1）；`std::layout_left` 是列优先（第一维步长 1）；`std::layout_stride` 让你自己给每维步长。
@@ -165,7 +173,7 @@ flowchart LR
 
 最后一行有个改名史要注意：C++23 定稿里这个成员叫 `data_handle()`，不叫 `data()`。本机写 `m.data()` 会得到 `error: no member named 'data' in 'std::mdspan<...>'`，从旧提案或早期博客上抄代码的人基本都会撞一次。
 
-构造要注意**参数顺序**：先是数据指针，然后按维度从小到大给长度。
+构造要注意参数顺序：先是数据指针，然后按维度从小到大给长度。
 
 ```cpp
 // 示意片段，不参与站点编译验证
@@ -194,6 +202,8 @@ flowchart TB
 :::
 
 ## 常见坑
+
+七条坑按性质排列：1、2 是生命周期，3、4、5 是接口细节，6 是 mdspan 的语义，7 是设计判断。4 和 6 会静默给出错误结果，其余都会以警告、编译错误或崩溃的形式露面。
 
 ### 1. 返回指向局部的 span
 
@@ -276,16 +286,16 @@ show(a);        // error: call to 'show' is ambiguous
 
 ### 6. mdspan 的存储顺序与索引顺序不一致
 
-这是 mdspan 最容易静默错的地方。`m[r, c]` 的两个参数含义不变（第一维、第二维），但换成 `layout_left` 之后，`m[0, 1]` 不再指向"第一行第二个元素"，而是指向偏移 3。示例里 `right[1, 0]` 是 10、`left[0, 1]` 是 3，就是这个区别。
+这是 mdspan 最容易静默错的地方，也是这一页里"看起来对、结果错"的典型。`m[r, c]` 的两个参数含义不变（第一维、第二维），但换成 `layout_left` 之后，`m[0, 1]` 不再指向"第一行第二个元素"，而是指向偏移 3。示例里 `right[1, 0]` 是 10、`left[0, 1]` 是 3，就是这个区别。
 
 实际后果：
 
 - 从文件里读进来的是行优先数据，却用 `layout_left` 解释，你得到的是**转置过的**矩阵，而且不会报错。
 - 把 mdspan 传给按行优先写的外部库（BLAS、图像库），layout 不匹配就是错的。
 
-标准自带三种 layout：`layout_right`、`layout_left`、`layout_stride`。前两个是行优先 / 列优先，第三个让你自己给每维的步长（做 padding、取子块、对接外部库时用）。本机三种都实测可用，更特殊的布局才需要自己写 mapping。选 layout 时唯一要回答的问题是：**这块内存是谁按什么顺序写进去的**。
+标准自带三种 layout：`layout_right`、`layout_left`、`layout_stride`。前两个是行优先 / 列优先，第三个让你自己给每维的步长（做 padding、取子块、对接外部库时用）。本机三种都实测可用，更特殊的布局才需要自己写 mapping。选 layout 时只需回答一个问题：这块内存是谁按什么顺序写进去的。
 
-判断标准很简单：**layout 描述的是内存，不是你的数学直觉**。数据是你自己按某种顺序写进去的，就必须用同样的 layout 读，或者显式地按 layout 做转置。
+判据也要落在这里：layout 描述的是内存的实际写入顺序，与数学上的行列直觉不必一致。数据按某种顺序写进去，就必须用同样的 layout 读，或者显式地按 layout 做转置。
 
 ### 7. 别把 span 当成员长期持有
 
@@ -296,6 +306,8 @@ span 适合出现在**参数表和返回值的边界**上，不适合出现在**
 :::
 
 ## 编译器支持
+
+这一节只做一件事：把"本机能不能用"变成可复核的事实。先给环境，再给逐项实测表，最后给复核宏和跨编译器的判断依据。
 
 本机实测环境：
 
@@ -341,6 +353,8 @@ clang++ -std=c++23 -dM -E m.cpp | rg "__cpp_lib_(span|mdspan|submdspan)"
 
 ## 与 learncpp 的关系
 
+这一节做一件事：把 span 放回 learncpp 的学习路径。先看前几章留下了什么零件、缺了哪个类型，再给阅读顺序。
+
 learncpp 第 17 章讲数组与指针，第 18 章讲迭代器。这两章加起来有"一段内存"的全部零件，但缺一个把零件装起来的类型：
 
 | 你学过的 | 它解决了什么 | 它没解决什么 |
@@ -357,6 +371,8 @@ learncpp 第 17 章讲数组与指针，第 18 章讲迭代器。这两章加起
 还有一处联系容易被忽略：第 17 章讲的"数组名在大多数语境下退化成首元素指针"，正是 span 想避免的东西——`span` 是把长度和指针焊在同一个值里的标准类型，传参、取子视图、返回都不会只剩一根指针。C++20 之前，这件事由 C++ Core Guidelines 的 `gsl::span` 承担，编译器诊断 `-Wdangling-gsl` 的名字就是那段历史的痕迹。
 
 ## 小练习
+
+四道练习按这一页的四个难点排列：接口替换、静态 extent 的歧义、layout、悬垂。前两道照着重载和转换写就能跑通，后两道要观察实际输出和诊断。
 
 **练习 1：把老接口换成 span。** 找一个你写过的 `void f(T* p, int n)`，改成 `void f(std::span<T>)`，然后让调用点分别传 C 数组、`std::array`、`std::vector`，确认三处都不需要改函数体。再想一个问题：原来 `n` 是 `int`，现在 `size()` 是 `size_t`，哪里会出现有符号 / 无符号混用的警告？
 

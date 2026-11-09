@@ -5,24 +5,24 @@ description: learncpp 主线到第 28 章就停了，这一页列出它没覆盖
 
 # 为什么需要 LearnC++ Plus
 
-你已经把 learncpp 从第 0 章读到第 28 章：会写类、会写模板、知道 RAII 和 move semantics，也知道异常该怎么抛。然后你打开一份 C++20 的代码，看到 `std::ranges::sort(v)`、`requires`、`std::format`、`std::expected`，发现自己一个都不认识。
+你已经把 learncpp 从第 0 章读到第 28 章：会写类、会写模板，知道 RAII 和 move semantics，也知道异常该怎么抛。然后你打开一份 C++20 的代码，看到 `std::ranges::sort(v)`、`requires`、`std::format`、`std::expected`，发现自己一个都不认识。
 
-这不是你的问题。learncpp 是一条设计得很好的主线，但它确实有终点。这一页把终点之后的地图画出来：缺了什么、本站怎么补、按什么顺序读。
+learncpp 是一条设计得很好的主线，但它确实有终点。这一页在终点之后画地图，只做三件事：先看缺了什么，再看本站怎么补，最后给出两条可以照着读的顺序。
 
 ## learncpp 的覆盖边界
 
-learncpp 的优点和局限是同一件事：它把"从零到能写程序"这条路修得很平，但修到某个位置就收工了。
+这一节只回答一个问题：learncpp 的边界画在哪里。它的优点和局限是同一件事——它把"从零到能写程序"这条路修得很平，但修到某个位置就收工了。四条边界分别落在章节数量、未完成章节、附录深度和标准年份上。
 
 - **主线到第 28 章**。第 28 章讲 iostream，之后没有第 29 章。并发、协程、标准库专题都没有位置。
 - **第 18、19 章仍是 under construction**。迭代器与算法、动态内存这两块长期挂着"未完成"的标记，`<ranges>` 和 views 自然也不在其中。
 - **Appendix B 只是 C++11–23 简介**。一页纸列出特性名加一句话解释，够你认得出，不够你写得出。
 - **C++26 完全没有涉及**。语言和库的更新停在 C++23 之前，reflection、contracts 这些连名字都不会出现。
 
-所以"读完 learncpp"不等于"会现代 C++"。它给的是地基和承重墙，装修和后续加建要另找图纸。
+所以"读完 learncpp"只拿到地基和承重墙，离"会现代 C++"还差装修和后续加建。
 
 ## 缺口表
 
-下表按 learncpp 的章节位置列出缺口。"本站对应"一列里，已经写好的页面直接给链接，还没写的写模块名。
+这张表按 learncpp 的章节位置列出十二处缺口；最后一列"本站对应"里，已经写好的页面直接给链接，还没写的写模块名。
 
 | learncpp 位置 | 已经讲了 | 没讲或只提到名字 | 本站对应 |
 | --- | --- | --- | --- |
@@ -39,11 +39,11 @@ learncpp 的优点和局限是同一件事：它把"从零到能写程序"这条
 | Ch15.1 this 指针、Ch26 类模板 | 隐式 `this`、成员函数重载、CRTP | 显式对象参数（deducing this）、CRTP 的替代写法 | [deducing this](/cpp23/deducing-this) |
 | Appendix B | C++11–23 特性名一览 | `flat_map` / `flat_set`、`inplace_vector`、`hive`、`simd`、pack indexing | [flat_map 与 flat_set](/stdlib/flat-map) |
 
-一句话总结这张表：**learncpp 缺的不是语法细节，而是 2020 年之后标准库和语言设施的组织方式**。你缺的是 ranges 这种"换一种写法"的东西，不是再多背几个关键字。
+这张表指向同一个结论：learncpp 缺的不是语法细节，而是 2020 年之后标准库和语言设施的组织方式。具体到写代码，你缺的是 ranges 这种"换一种写法"的东西，不是再多背几个关键字。
 
 ## 一个最小对照
 
-缺口听起来抽象，落到代码上就是下面这样。同样是从一堆数里取出偶数并求平方，按 learncpp 第 18 章的写法，你得手动管理迭代器和中间容器：
+缺口听起来抽象，落到代码上就是下面这样。两段代码做同一件事——从一堆数里取出偶数并求平方；按 learncpp 第 18 章的写法，第一段得手动管理迭代器和中间容器：
 
 ```cpp
 // 示意片段，不参与站点编译验证
@@ -55,7 +55,7 @@ std::transform(evens.begin(), evens.end(), std::back_inserter(squares),
                [](int x) { return x * x; });
 ```
 
-而 C++20 之后，同一件事可以写成一条管道：
+C++20 之后，同一件事可以写成一条管道：
 
 ```cpp
 // 示意片段，不参与站点编译验证
@@ -64,21 +64,23 @@ auto squares = v
              | std::views::transform([](int x) { return x * x; });
 ```
 
-区别不只是少写几行：第二版是惰性求值，没有中间 `vector`，也可以直接接 `std::ranges::to` 材料化。learncpp 没有讲这套东西，因为它连第 18 章都还没写完，而 ranges 恰好建立在这一章之上。[ranges 与 views](/cpp20/ranges) 就是从这里接着讲。
+区别不只在少写的那几行：第二版是惰性求值，没有中间 `vector`，也可以直接接 `std::ranges::to` 材料化。learncpp 没有讲这套东西，因为它连第 18 章都还没写完，而 ranges 恰好建立在这一章之上。[ranges 与 views](/cpp20/ranges) 就是从这里接着讲。
 
 ## 本站的五条主线
 
-本站不重讲 learncpp 已经讲清楚的内容，只补它没讲的部分，按五条线组织：
+本站不重讲 learncpp 已经讲清楚的内容，只补它没讲的部分，按五条线组织。前四条是知识领域，第五条管环境与验证。
 
 1. **语言核心**：concepts 与 `requires`、modules、`consteval` / `constinit` / `if consteval`、deducing this、`<=>`、designated initializers、lambda 进阶。这些是写库的人和读标准库源码的人必须过的关。
-2. **标准库**：ranges 与 views、`<span>` / `<mdspan>`、`<format>` / `<print>`、`<expected>` 与单子操作、`flat_map` / `inplace_vector` 这类新容器，以及 `chrono`、`filesystem`、`bit`、`source_location` 的补充。
-3. **并发与异步**：`jthread` 与 `stop_token`、`latch` / `barrier` / `semaphore`、atomic 的 wait/notify、协程基础，最后才谈 execution 与 senders/receivers。
-4. **C++26 跟踪**：reflection、contracts、`std::simd`、pack indexing、`#embed`。这部分本机工具链大多还验证不了，写法会明确区分"标准已定"和"实现可用"。
+2. **标准库**：ranges 与 views、`<span>` / `<mdspan>`、`<format>` / `<print>`、`<expected>` 与单子操作，以及 `flat_map` / `inplace_vector` 这类新容器；`chrono`、`filesystem`、`bit`、`source_location` 作为补充。
+3. **并发与异步**：先讲 `jthread` 与 `stop_token`、`latch` / `barrier` / `semaphore`、atomic 的 wait/notify，再讲协程基础，最后才谈 execution 与 senders/receivers。
+4. **C++26 跟踪**：reflection、contracts、`std::simd`、pack indexing、`#embed`。这部分本机工具链大多还验证不了，所以写法上会明确区分"标准已定"和"实现可用"。
 5. **工程与验证**：编译器支持矩阵、feature-test macro 速查、CMake 与 modules、把 learncpp 风格的项目迁到 C++23。读任何一篇之前，先看 [本机工具链与标准选择](/guide/toolchain) 把你的环境对齐。
+
+五条线补的正是缺口表里那十二行，下面一张图说明它们与 learncpp 章节的对应关系。
 
 ## 从 learncpp 章节到补充模块
 
-下面这张图把 learncpp 主线和本站五条主线（L1–L5）对应起来：左边是已经读过的地方，右边是接着要读的地方。逐章的对应关系看上面的缺口表。
+下面这张图把 learncpp 主线和本站五条主线（L1–L5）对应起来：左边是已经读过的地方，右边是接着要读的地方；逐章的对应关系看上面的缺口表。
 
 ```mermaid
 flowchart LR
@@ -104,13 +106,13 @@ flowchart LR
   L5 --> K[编译器支持矩阵]
 ```
 
-图里最要紧的是 `GAP` 和 `APPB` 两个节点：前者说明并发这块在 learncpp 里根本没有入口，后者说明 C++23/26 的库在附录里只有名字。本站的大部分篇幅都花在这两条边上。
+图里最要紧的是 `GAP` 和 `APPB` 两个节点。前者说明并发这块在 learncpp 里根本没有入口，后者说明 C++23/26 的库在附录里只有名字；本站的大部分篇幅都花在这两条边上。
 
 ## 建议阅读顺序
 
-先完成 [本机工具链与标准选择](/guide/toolchain)，确认你的 `clang++` 版本、标准库版本和 `-std` 选项能跑到 C++23。然后按你的痛点选一条路径，两条可以交叉读。
+阅读顺序分两步。第一步是 [本机工具链与标准选择](/guide/toolchain)，确认你的 `clang++` 版本、标准库版本和 `-std` 选项能跑到 C++23。第二步按痛点选路径，两条可以交叉读。
 
-**路径 A：补语言。** 适合"看得懂语法但读不懂标准库源码和错误信息"的人。
+**路径 A：补语言**，适合看得懂语法、但读不懂标准库源码和错误信息的人。
 
 ```mermaid
 flowchart TB
@@ -134,11 +136,11 @@ flowchart TB
 
 - [concepts 与 requires](/cpp20/concepts)：先把约束写法吃透，后面读 ranges 的 CPO 和标准库的 `requires` 子句都靠它。
 - [deducing this](/cpp23/deducing-this)：显式对象参数，也是 CRTP 的现代替代。
-- [consteval、constinit 与 if consteval](/cpp20/consteval)：把"编译期算"从 `constexpr` 的"可以"变成 `consteval` 的"必须"。
+- [consteval、constinit 与 if consteval](/cpp20/consteval)：`constexpr` 只说"可以在编译期算"，`consteval` 要求"必须在编译期算"。
 - [jthread 与 stop_token](/concurrency/jthread) 与 [latch / barrier / semaphore](/concurrency/sync-primitives)：从会自己收尾的线程起步，不要一上来就啃 senders/receivers。
 - [协程：手写一个惰性 task](/cpp20/coroutines)：先手写一个 task，才知道调度器到底在替你做什么。
 
-**路径 B：补标准库。** 适合"会写类但一写业务就手写循环"的人。
+**路径 B：补标准库**，适合会写类、但一写业务就手写循环的人。
 
 ```mermaid
 flowchart TB
@@ -169,7 +171,7 @@ flowchart TB
 
 ## 本站的内容原则
 
-学新标准最怕遇到"看起来能跑"的示例。本站用三条规则约束自己：
+学新标准时最怕遇到"看起来能跑"的示例。本站用三条规则约束自己：
 
 1. **示例可编译**。完整示例都放在 `docs/snippets/` 下，由 `clang++` 实际编译、运行并比对 stdout，页面只引入验证过的那份文件。讲思路的片段会明确标成示意，不冒充已验证代码。
 2. **版本标注**。每篇都会写明需要的 `-std`、编译器版本和标准库版本；不确定的地方写明"需要 clang 某版本以上"，而不是含糊地说"较新编译器支持"。
@@ -177,7 +179,7 @@ flowchart TB
 
 ## 编译器支持
 
-本站的"支持 / 不支持"不是凭印象写的，而是在真实的工具链上跑出来的。当前验证环境是 clang 23 + libc++ 23（`_LIBCPP_VERSION 230104`），`-std=c++20 / c++23 / c++26` 都能接受；`<ranges>`、concepts、`<expected>`、`<format>` 可以编译并运行，而 `<generator>`、`<hive>`、`<inplace_vector>`、`<simd>` 缺头文件，reflection 和 contracts 缺编译器实现。
+本站的"支持 / 不支持"在真实的工具链上跑出来，不凭印象写。当前验证环境是 clang 23 + libc++ 23（`_LIBCPP_VERSION 230104`），`-std=c++20 / c++23 / c++26` 都能接受；`<ranges>`、concepts、`<expected>`、`<format>` 可以编译并运行，而 `<generator>`、`<hive>`、`<inplace_vector>`、`<simd>` 缺头文件，reflection 和 contracts 缺编译器实现。
 
 这些差异逐项列在 [编译器支持矩阵](/reference/compiler-support)，环境怎么装、标准版本怎么切见 [本机工具链与标准选择](/guide/toolchain)。你的编译器版本很可能和本站不同，所以页面上的标注只是参照，最终以你自己跑出来的结果为准。
 

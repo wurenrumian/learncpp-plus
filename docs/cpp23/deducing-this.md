@@ -16,7 +16,11 @@ auto&& f(this Self&& self);
 
 它一次解决三件本来要写很多代码的事：const / 非 const / 左值 / 右值的四套重载、CRTP 里的 `static_cast` 下转、以及「lambda 调用自己」。
 
+下面按这三件的顺序展开：先算清四套重载的成本，再讲 `Self` 的推导规则，然后落到 CRTP 与递归 lambda 两处替代写法，最后收在编译器的硬限制上。
+
 ## 动机：四套重载的样板代码
+
+这一节分两步：先看四套重载要付什么代价，再看两类连写法都没有的场景。
 
 写一个带 `&&` 限定的访问器，把「在右值上可以搬走成员」这件事暴露出来，传统写法长这样：
 
@@ -33,16 +37,18 @@ private:
 };
 ```
 
-问题不在长度，在于**同一份逻辑被抄了四遍**：
+真正要付的代价是同一份逻辑抄了四遍，长度只是表象：
 
 - 函数体一模一样，只有签名不同，改一处就要同步四处。
 - `noexcept`、`[[nodiscard]]`、注释也要跟着复制。
 - 四个里漏一个不会有编译错误，只会在某次调用时静默退化成拷贝、或者干脆匹配不上。
 - 如果想在返回类型上还做点推导（`auto&&`），四个重载之间的类型必须手动保持一致。
 
-更糟的是第二类场景：CRTP 的静态多态和递归 lambda，它们不是样板代码问题，而是「这件事根本写不出来」的问题。deducing this 把两类问题一起解决了。
+更难的是另一类场景：CRTP 的静态多态和递归 lambda 缺的不是样板，而是「这件事根本写不出来」。deducing this 把两类问题一起解决了。
 
 ## 最小示例
+
+先把签名立起来，确认一句 `auto&&` 能覆盖四种调用。
 
 ```cpp
 struct Widget {
@@ -65,7 +71,7 @@ struct Widget {
 
 ## 机制：`Self` 到底推导成什么
 
-这张 flowchart 是这一页的核心，值得单独画一遍：
+分两层看：flowchart 给路径，下面的推导表给每一格的确切类型。先看 flowchart。
 
 ```mermaid caption="调用表达式决定 Self，Self 决定一切"
 flowchart TD
@@ -79,7 +85,7 @@ flowchart TD
     Body --> Fwd["std forward 还原值类别"]
 ```
 
-把四种调用摆在一起看更清楚（`Buffer` 里存 `std::string data_`）：
+把四种调用摆在一起，每一行的推导结果都能对上（`Buffer` 里存 `std::string data_`）：
 
 | 调用表达式 | `Self` 推导为 | 形参 `self` 的类型 | `std::forward<Self>(self)` 的结果 |
 | --- | --- | --- | --- |
@@ -151,7 +157,7 @@ private:
 
 <<< @/snippets/cpp23/deducing-this.cpp
 
-几个值得停下来看的点：
+四个值得停下来看的点：
 
 - `at()` 返回 `auto&&`，三个 `static_assert` 在**编译期**钉死了 `std::string&` / `const std::string&` / `std::string&&` 三种返回类型，不需要运行期测试。
 - `release()` 用 `static_assert(std::is_rvalue_reference_v<Self&&>)` 表达「只接受右值」，省掉一个 `&&` 限定重载。
@@ -159,6 +165,8 @@ private:
 - `Drawable::print` 里的 `Self` 推导成 `Circle&`，静态分派直接命中派生类的 `shape_name()`。
 
 ## 替代 CRTP 的静态多态
+
+这一节分三步：CRTP 的成本、deducing this 的替代写法、以及它替代不了的那部分。
 
 CRTP（curiously recurring template pattern）是 C++ 里实现「静态多态」的老办法：
 
@@ -173,7 +181,7 @@ struct Circle : Shape<Circle> {          // 派生类名写了两遍
 };
 ```
 
-痛点很具体：
+三条成本都落在代码上：
 
 - 基类必须是模板，派生类必须把自己的名字当模板实参再写一遍，写错就是未定义行为。
 - 基类里拿到的是 `Derived*`，`const` 性要靠 `const_cast` / 手写两个版本去维护。
@@ -228,7 +236,7 @@ std::println("fib(20) = {}", fib(20));   // 6765
 
 `this auto&& self` 让闭包的 `operator()` 变成一个模板，`self` 就是闭包自身，`self(...)` 是一次普通的递归调用，没有类型擦除。
 
-要点：
+四条要点，全部落在参数表上：
 
 - `self` **必须是第一个参数**，`this` 只能出现在参数表最前面。
 - `self` 是 `auto&&`，所以既能以左值也能以右值方式递归（`std::move(self)(n)` 语法上是允许的，一般用不到）。
@@ -237,7 +245,7 @@ std::println("fib(20) = {}", fib(20));   // 6765
 
 ## 常见坑
 
-以下每条都在 clang 23 上实际触发过，错误信息照抄。
+八条都在 clang 23 上实际触发过，错误信息照抄。
 
 ### 1. 显式对象参数不能是 `static`
 
@@ -319,6 +327,8 @@ static_assert(std::is_same_v<decltype(&A::f), void (*)(A&)>);
 
 ### 最佳实践
 
+五条，按写代码时的决策顺序排：
+
 - 一个成员函数要同时服务 const / 非 const / 左值 / 右值：用 deducing this，别写四个。
 - 只需要固定的 cv / 值类别：直接写具体类型（`this T& self`），比写模板更易读、报错更友好。
 - 需要约束（只要右值、只要某个 concept）：优先 `requires`，让候选在重载决议阶段就消失。
@@ -326,6 +336,8 @@ static_assert(std::is_same_v<decltype(&A::f), void (*)(A&)>);
 - 里层转发一律 `std::forward<Self>(self)`。
 
 ## 编译器支持
+
+判定依据、各编译器的门槛、本页的验证环境，分开说。
 
 判定标准是特性宏，本机 clang 23.1.4 的值是 `202110`：
 
@@ -353,6 +365,8 @@ static_assert(std::is_same_v<decltype(&A::f), void (*)(A&)>);
 learncpp 15.1 讲隐式 `this` 指针，第 21 章讲成员/非成员运算符重载，第 26 章讲类模板。四套 cv / 值类别重载、CRTP 的 `static_cast` 下转，在这三章里都是手写样板；deducing this（C++23）把它们收成一个模板参数，但它是静态分派，替代不了第 25 章的虚函数。
 
 ## 小练习
+
+三个练习：第一个改写现有代码，后两个各写一个自己的小抽象。
 
 **练习 1：把四套重载收成一个**
 
@@ -384,4 +398,4 @@ learncpp 15.1 讲隐式 `this` 指针，第 21 章讲成员/非成员运算符�
 - 值类别靠 `std::forward<Self>(self)` 还原，返回类型用 `auto&&` / `decltype(auto)`。
 - 它替代的是 CRTP 和「四套重载」，不是虚函数。
 - 递归 lambda 是它最出人意料的副产品：`[](this auto&& self, ...) { self(...); }`。
-- 记住几条硬约束：不能 `static`、不能 `virtual`、`this` 必须在第一位且不能带后缀限定符。
+- 四条硬约束：不能 `static`、不能 `virtual`、`this` 必须在第一位且不能带后缀限定符。

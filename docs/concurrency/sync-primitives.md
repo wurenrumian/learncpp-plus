@@ -7,9 +7,11 @@ description: std::latch 一次性倒计数、std::barrier 多阶段会合与 com
 
 `std::thread` 和 `std::mutex` 能让你把工作分出去，但"怎么知道所有线程都到齐了""怎么让一批线程一起进入下一阶段""怎么限制同时只有两个线程在跑"这三个问题，C++20 之前只能自己用 `mutex + condition_variable + 计数器` 拼。C++20 把这三件事各给了专门的原语：`std::latch`、`std::barrier`、`std::counting_semaphore`。本页讲清它们的语义、边界和用途。
 
+行文顺序是：先用手写版本说明三个原语各自接替了哪段样板，再给出一次能跑完三者的示例，然后逐个拆语义与边界，最后收七个常见的误用。
+
 ## 动机：手写的"等 N 个线程就绪"太容易漏东西
 
-先看一段很多人写过的代码。主线程要等 3 个 worker 完成初始化：
+这一节只用一段手写代码，说明三个原语各自接手的部分。主线程要等 3 个 worker 完成初始化：
 
 ```cpp
 #include <condition_variable>
@@ -36,6 +38,8 @@ void wait_all() {
 
 一共四个必须同时对的地方：锁、计数器、`notify`、谓词。漏一个 `notify_one`，程序不报错，只是永远卡住；谓词写成 `done > 3`，同样是静默挂死。要"等 N 个"就必须配 N，写错量词没人提醒你。
 
+四个点里，计数器和 `notify` 是这段代码自带的协议，锁和条件变量是通用工具。协议每换一类同步点就要重写一次，这是后面所有样板代码的来源。
+
 多阶段更糟。让两个线程"每算完一步就等对方也算完，再一起进入下一步"，你需要在计数器之外再维护一个 `phase` 变量、决定用 `notify_one` 还是 `notify_all`、还得防"先到的线程已经把阶段推进了，后到的线程还在等上一个阶段"的竞态。样板代码长了，出错概率是乘法。
 
 C++20 的三个原语就是把这三类同步点变成有名字、有明确前置条件的类型：
@@ -44,9 +48,11 @@ C++20 的三个原语就是把这三类同步点变成有名字、有明确前�
 - `std::barrier`：可复用的会合点，一批线程反复"到齐 → 一起走"。
 - `std::counting_semaphore`：计数型许可，限制同时进行的数量。
 
+三者的区别只有三处：计数能不能涨回去、谁来执行收尾、等待是否绑定线程。后面的小节按类型逐个展开，这三处区别会落到具体的接口上。
+
 ## 最小示例
 
-下面这个程序可以在本机直接编译运行，三段分别演示 latch、barrier 和 semaphore，输出完全确定（连续运行 5 次逐字节一致）：
+这一节把三者放进一个程序，一次跑完。三段分别演示 latch、barrier 和 semaphore，输出完全确定（连续运行 5 次逐字节一致）：
 
 <<< @/snippets/concurrency/sync-primitives.cpp
 
@@ -65,7 +71,7 @@ semaphore : peak concurrency = 2 of limit 2
 semaphore : 4 tasks done
 ```
 
-三处值得注意的细节：
+输出确认三件事。
 
 - latch 的计数是 `kWorkers + 1`：3 个 worker 各 `count_down()` 一次，主线程自己 `arrive_and_wait()` 再减一次。如果主线程只 `wait()` 不 `arrive`，计数应该写成 3。
 - barrier 的 `phase 1 complete` 由 **completion function** 打印，而它运行在最后一个到达的线程上，不是在主线程上。因此这两行的顺序是确定的：所有 worker 都必须先到达。
@@ -76,6 +82,8 @@ semaphore : 4 tasks done
 页内其余代码块都是说明性片段，只有上面这份文件经过 `npm run verify` 的编译与输出比对。
 
 ## 机制与语义
+
+这一节分四块：先看三者的分工图，再逐个讲 latch、barrier、semaphore 的语义，最后用一张表把选型固定下来。
 
 ```mermaid
 flowchart TB
@@ -93,9 +101,11 @@ flowchart TB
     end
 ```
 
-三者的共同点是"等待一个计数条件"，区别在于**计数能不能涨回去**、**谁来执行收尾工作**、**等待的语义是不是绑定线程**。
+三者等的都是"一个计数条件"，上一节列的三处区别在这张图里各占一格。
 
 ### std::latch：一次性倒计数
+
+`latch` 的接口很少，看一遍就够：
 
 ```cpp
 #include <latch>
@@ -109,8 +119,8 @@ bool now = gate.try_wait();// 不阻塞，立刻返回"是否已经归零"
 
 要点：
 
-- **只减不加**。`latch` 没有 `count_up`、没有 `reset()`，归零以后永久处于"已打开"状态，再 `wait()` 立刻返回。这正是"等一次就够"的语义。
-- 计数一旦是 0，就不能再 `count_down()`。标准的前置条件要求计数大于 0，违反是未定义行为（见"常见坑"第一条——本页示例在起草时就踩到了：4 个任务对初始计数为 2 的 latch 调用 `arrive_and_wait`，计数被减成负数，程序静默挂死）。
+- 只减不加。`latch` 没有 `count_up`、没有 `reset()`，归零以后永久处于"已打开"状态，再 `wait()` 立刻返回。这正是"等一次就够"的语义。
+- 计数一旦是 0，就不能再 `count_down()`。标准的前置条件要求计数大于 0，违反是未定义行为（undefined behavior，下称 UB）。"常见坑"第一条就是本页示例在起草时踩到的实例：4 个任务对初始计数为 2 的 latch 调用 `arrive_and_wait`，计数被减成负数，程序静默挂死。
 - `arrive_and_wait()` 等价于 `count_down(1)` 加 `wait()`，是"我到了，并且我要等其他人"的合并写法。
 - `try_wait()` 让你在"不想阻塞"的场合（比如 UI 线程做进度轮询）检查状态。
 - 实现上是一个原子计数加等待队列，不需要锁，也不需要 `notify` 与 `wait` 手工配对，所以比手写 `condition_variable` 更省心，通常也更快。
@@ -118,6 +128,8 @@ bool now = gate.try_wait();// 不阻塞，立刻返回"是否已经归零"
 典型用途：等待一组线程完成初始化、等待 N 个异步请求全部返回（配合回调里的 `count_down`）、给测试写"发令枪"。
 
 ### std::barrier：可复用的会合点
+
+`barrier` 的重点分两层：会合本身靠计数，会合之后的收尾靠 completion function。先看最小用法：
 
 ```cpp
 #include <barrier>
@@ -137,7 +149,7 @@ void worker(int id, std::barrier<>& phase) {
 }
 ```
 
-真正的价值在 **completion function**。它在最后一个线程到达时、在屏障被重置之前、在该线程上执行；此时其他参与者都还堵在 `wait` 里，不会碰共享数据。所以"准备下一阶段"的收尾代码放在这里最安全，不需要额外加锁：
+会合之外还有一层：completion function 在最后一个线程到达时、在屏障被重置之前、在该线程上执行；此时其他参与者都还堵在 `wait` 里，不会碰共享数据。所以"准备下一阶段"的收尾代码放在这里最安全，不需要额外加锁：
 
 ```cpp
 std::vector<int> front(1024), back(1024);
@@ -149,13 +161,15 @@ std::barrier phase{8, [&front, &back]() noexcept {
 
 几个容易忽略的语义：
 
-- **执行者是"最后一个到达的线程"**，不是主线程，也不是固定的某一个线程。所以 completion function 里不要操作线程局部状态，也不要假设自己的线程身份。
+- 执行者是"最后一个到达的线程"，不是主线程，也不是固定的某一个线程。所以 completion function 里不要操作线程局部状态，也不要假设自己的线程身份。
 - 它在屏障重置之前运行，且此时其他线程被挡住——这就是它"可以安全准备下一阶段"的全部原因。
 - 标准要求 completion function 是 `noexcept` 可调用的。抛异常直接 `std::terminate`，没有调用栈可以挽回。
 - 它应该短。所有参与者都在等它，它慢多少，整个阶段就慢多少。
-- `arrive_and_drop()`：本轮的 `arrive` 照算（不会让其他人白等），但之后永久少一个参与者。适合"某个 worker 干完自己的活提前退出"的流水线。**这个减员不可撤销**：barrier 没有 `arrive_and_add`，参与数不能涨回去。
+- `arrive_and_drop()`：本轮的 `arrive` 照算（不会让其他人白等），但之后永久少一个参与者。适合"某个 worker 干完自己的活提前退出"的流水线。这个减员不可撤销：barrier 没有 `arrive_and_add`，参与数不能涨回去。
 
 ### counting_semaphore 与 binary_semaphore：许可计数
+
+`semaphore` 只有一个计数器，要抓住三件事：许可怎么借还、谁有权归还、上限与初始值分别落在哪个位置。
 
 ```cpp
 #include <chrono>
@@ -172,7 +186,7 @@ std::binary_semaphore flag{0};         // 等价于 counting_semaphore<1>
 
 几个关键点：
 
-- **没有所有者概念**。`mutex` 记录"谁锁的"，只有锁的持有者能解锁；信号量只是一个计数器，谁都能 `release()`。所以它天然支持"一个线程等，另一个线程放行"这种事件通知：
+- 没有所有者概念。`mutex` 记录"谁锁的"，只有锁的持有者能解锁；信号量只是一个计数器，谁都能 `release()`。所以它天然支持"一个线程等，另一个线程放行"这种事件通知：
 
   ```cpp
   std::binary_semaphore data_ready{0};
@@ -181,11 +195,13 @@ std::binary_semaphore flag{0};         // 等价于 counting_semaphore<1>
   void consumer() { data_ready.acquire(); consume(); }
   ```
 
-- **不可重入**。同一个线程连续 `acquire()` 两次，第二次会把自己锁死：初始许可为 1 时，第一次拿到唯一那个许可，第二次永远等不到人 `release`。
+- 不可重入。同一个线程连续 `acquire()` 两次，第二次会把自己锁死：初始许可为 1 时，第一次拿到唯一那个许可，第二次永远等不到人 `release`。
 - 适合"限制并发数""资源池计数""生产者/消费者队列的长度上限"。上面的最小示例就用 `counting_semaphore<2>` 把 4 个任务压到同时最多 2 个。
 - `try_acquire_for` / `try_acquire_until` 返回 `bool`，超时是正常返回值而不是异常，过期了要自己决定降级还是重试。标准还允许它们**伪失败**（明明有许可却返回 `false`），所以判失败只能当作"这次没拿到"，不能当作"资源一定被占满"。
 
 ### 三者与 condition_variable 怎么选
+
+这一块回答一个实际问题：手上有一个同步需求，该拿哪个类型。先按"要等什么"归类，再对照表中列出的 API。
 
 | 你要解决的问题 | 该用什么 | 关键 API |
 | --- | --- | --- |
@@ -196,9 +212,11 @@ std::binary_semaphore flag{0};         // 等价于 counting_semaphore<1>
 | 保护共享数据，需要所有权与 RAII | `std::mutex` + `lock_guard` | `lock` / `unlock` |
 | 等一个复杂条件、条件不只是一个计数 | `std::condition_variable` | `wait(lock, pred)` |
 
-一句话记忆：**一次性等待用 latch，多阶段用 barrier，限制数量用 semaphore，保护数据仍然用 mutex**。这三个原语都不保护任何数据，它们只协调"时间"。
+一句话记忆：一次性等待用 latch，多阶段用 barrier，限制数量用 semaphore，保护数据仍然用 mutex。这三个原语都不保护任何数据，它们只协调"时间"。
 
 ## 常见坑
+
+七个坑按主题分三组：第 1 到 3 条是 latch 与 barrier 的边界条件，第 4、5 条是 semaphore 的语义误读，第 6、7 条是获取顺序与超时处理。前三条里，第 1、3 条的表现是静默挂住，第 2 条是进程直接结束。
 
 ### 1. latch 的计数只能减，归零后继续减是未定义行为
 
@@ -250,9 +268,9 @@ std::counting_semaphore<2> b{2};   // 上限 2，初始 2：可以同时进两�
 
 长得像（一个许可 = 一把锁），语义差得远：
 
-- **没有所有权**：任何线程都能 `release()`，包括根本没 `acquire()` 过的线程。这既是它的用处（跨线程放行），也是它的危险（"只有持有者能解锁"的假设不成立）。
-- **不可重入**：同一线程 `acquire()` 两次会死锁，没有递归信号量。
-- **没有 RAII 适配**：标准没给 `lock_guard` 的对应物，异常路径上要自己保证 `release()`。
+- 没有所有权：任何线程都能 `release()`，包括根本没 `acquire()` 过的线程。这既是它的用处（跨线程放行），也是它的危险（"只有持有者能解锁"的假设不成立）。
+- 不可重入：同一线程 `acquire()` 两次会死锁，没有递归信号量。
+- 没有 RAII 适配：标准没给 `lock_guard` 的对应物，异常路径上要自己保证 `release()`。
 - 它只传递"有一个许可"这个事实，不理解你保护的是哪块数据。
 
 所以用它保护共享数据是可以编译的，但一旦有人写错 `release` 的位置，你没有任何机制能发现。保护数据请继续用 `std::mutex`；`binary_semaphore` 留给"通知某件事发生了"。
@@ -290,6 +308,8 @@ std::optional<Result> try_take() {
 
 ## 编译器支持
 
+这一节回答两件事：三个头文件在本机是什么宏值，C++17 下会怎样失败。
+
 本机实测（clang 23.1.4，MSYS2 clang64，标准库 libc++ 230104）：
 
 | 头文件 | feature-test macro | 本机取值 |
@@ -305,6 +325,8 @@ std::optional<Result> try_take() {
 
 ## 与 learncpp 的关系
 
+这一节把三个原语对回手写代码里被替换掉的部分，也标出它们没覆盖的领域。
+
 learncpp 没有并发章节，本页的起点是大多数人手写的那套 `mutex + condition_variable + 计数器`。那套代码没有错，只是 C++20 之后，其中相当一部分样板可以直接换成标准类型：
 
 - 手写"等所有线程完成初始化"的 `cv + 计数器`，换成 `std::latch` 之后，锁、谓词、`notify` 三处易错点一起消失。
@@ -314,6 +336,8 @@ learncpp 没有并发章节，本页的起点是大多数人手写的那套 `mut
 还没有被这些原语覆盖的部分：线程的取消与协作停止（`std::jthread` 与 `stop_token`，见 [jthread 与 stop_token](/concurrency/jthread)）、把同步点藏进状态机的协程写法（见 [协程：手写一个惰性 task](/cpp20/coroutines)）。另外，这三个原语只协调时间，**不约束类型**——如果你想给"可等待的东西"写统一接口，那要用 concepts 收口，见 [concepts 与 requires](/cpp20/concepts)。
 
 ## 小练习
+
+五道练习，前三个原语各一道，后两道练边界与死锁。
 
 1. **用 latch 重写手写版本**：把本页开头那段 `mutex + condition_variable + done` 改成 `std::latch`，要求主线程不参与计数（用 `wait()` 而不是 `arrive_and_wait()`），并让 worker 数量变成一个运行期参数。
 2. **给 barrier 加双缓冲**：写 8 个 worker 的 3 阶段计算，每个阶段结束时用 completion function 交换 `front` / `back` 两个 `std::vector`。验证：任何 worker 在阶段内读到的都是上一阶段的完整结果。

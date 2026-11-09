@@ -5,13 +5,17 @@ description: "C++23 std::flat_map 与 std::flat_set 用排好序的连续数组�
 
 # flat_map 与 flat_set：把有序容器压平成数组
 
-`std::flat_map` 和 `std::flat_set` 是 C++23 加进标准的有序关联容器。它们满足和 `std::map` / `std::set` 相同的语义契约——按键有序、键唯一、`find` 走二分——但底层不是红黑树，而是**两块排好序的连续数组**。
+`std::flat_map` 和 `std::flat_set` 是 C++23 加进标准的有序关联容器。它们满足和 `std::map` / `std::set` 相同的语义契约——按键有序、键唯一、`find` 走二分——但底层不是红黑树，而是两块排好序的连续数组。
 
-一句话概括这次交换：**用 `O(n)` 的插入和更严格的失效规则，换掉每个元素的独立分配和遍历时的指针追逐。**
+这次交换可以一句话概括：用 `O(n)` 的插入和更严格的失效规则，换掉每个元素的独立分配和遍历时的指针追逐。
+
+这一页分三块：这笔交换到底换掉了什么（动机）、接口和不变量怎么落地（机制与语义）、从 `map` 迁过来会在哪儿坏（常见坑）。第三块最难，因为失败往往发生在运行期而不是编译期，所以篇幅也最长。
 
 ## 动机
 
-`std::map` 通常实现成一棵红黑树。为了保证插入 `O(log n)` 且迭代器永远稳定，它必须为**每一个元素单独分配一个节点**（这是实现层面的选择，标准只要求有序关联容器的接口与复杂度）：
+这一节算一笔账：`map` 的优势和代价都来自节点。先看节点带来什么，再看 `flat_map` 拿什么换。
+
+`std::map` 通常实现成一棵红黑树。为了保证插入 `O(log n)` 且迭代器永远稳定，它必须为每一个元素单独分配一个节点（这是实现层面的选择，标准只要求有序关联容器的接口与复杂度）：
 
 ```cpp
 // 说明性片段：两者在内存里的形态差别，不是完整程序
@@ -26,9 +30,11 @@ std::flat_map<int, Item> flat;   // 内部是 vector<int> keys 和 vector<Item> 
 
 `unordered_map` 解决了查找常数项，却仍然是"桶数组 + 节点"的混合体：每个元素照旧一次分配，遍历顺序还不可预期。
 
-`flat_map` 换一个做法：**把键和值分别塞进两个 `vector`，始终保持按键升序且无重复。** 于是在同一块内存上同时得到两件事——遍历是顺序扫描，查找是对着连续内存做二分。对"构建一次、查询很多次"的表尤其合算。
+`flat_map` 换一个做法：把键和值分别塞进两个 `vector`，始终保持按键升序且无重复。于是在同一块内存上同时得到两件事——遍历是顺序扫描，查找是对着连续内存做二分。对"构建一次、查询很多次"的表尤其合算；代价集中在插入上，后面「查找是二分，插入是搬移」一节算这笔账。
 
 ## 最小示例
+
+先跑一遍，把七段输出和七个 API 对上号，再读源码。
 
 下面这个程序把常用操作按主题分开演示：排序遍历、`find`、`try_emplace` 的不覆盖语义、`operator[]` 的读写、`erase` 的两个重载、批量构建，以及 `flat_set` 的去重。
 
@@ -40,13 +46,13 @@ std::flat_map<int, Item> flat;   // 内部是 vector<int> keys 和 vector<Item> 
 clang++ -std=c++23 -Wall -Wextra -O0 -fno-diagnostics-color docs/snippets/stdlib/flat-map.cpp -o $env:TEMP\flat-map.exe
 ```
 
-输出对应七个段落：
+输出对应七个段落，按输出顺序读比按源码读快：
 
-1. `[1]` 插入顺序是 pear、apple、kiwi……，但遍历出来是 `apple, banana, cherry, date, kiwi, pear`。**顺序由排序决定，与插入顺序无关**，这一点和 `map` 一致。
+1. `[1]` 插入顺序是 pear、apple、kiwi……，但遍历出来是 `apple, banana, cherry, date, kiwi, pear`。顺序由排序决定，与插入顺序无关，这一点和 `map` 一致。
 2. `[2]` `find` 命中返回迭代器，未命中返回 `end()`。别忘了 `find` 是 `O(log n)` 而不是 `O(1)`——它不是哈希表。
 3. `[3]` `try_emplace("apple", 999)` 返回 `{迭代器, false}`，值仍是 `3`。想覆盖请用 `insert_or_assign` 或 `operator[]`。
 4. `[4]` `operator[]` 对已存在的键只写值，对新键则插入——插入会重排后面的元素，这一点在"常见坑"里还会提。
-5. `[5]` `erase("date")` 按**键**删除，返回删掉的个数；`erase(begin())` 按**迭代器**删除，返回下一个位置的迭代器。两者返回值类型不同。
+5. `[5]` `erase("date")` 按键删除，返回删掉的个数；`erase(begin())` 按迭代器删除，返回下一个位置的迭代器。两者返回值类型不同。
 6. `[6]` 把 `vector<pair>` 先排序去重，再用 `std::sorted_unique` 一次性构造；随后的"不给标签"版本会自己排序去重，结果与逐条插入一致。
 7. `[7]` `flat_set` 插入时自动去重，遍历即升序。
 
@@ -54,9 +60,11 @@ clang++ -std=c++23 -Wall -Wextra -O0 -fno-diagnostics-color docs/snippets/stdlib
 
 ## 机制与语义
 
+这一节拆五块：存储模型、批量接口、查找与插入、复杂度、失效规则。前两块讲接口，后三块讲代价。
+
 ### 存储模型：两块并行数组
 
-标准把 `flat_map` 定义为**容器适配器**（和 `stack`、`queue` 同一类东西），它不拥有自己的节点，而是适配两个序列容器：
+标准把 `flat_map` 定义为容器适配器（和 `stack`、`queue` 同一类东西），它不拥有自己的节点，而是适配两个序列容器：
 
 ```cpp
 template<class Key, class T, class Compare = std::less<Key>,
@@ -65,7 +73,7 @@ template<class Key, class T, class Compare = std::less<Key>,
 class flat_map;
 ```
 
-因此有几个和 `map` 完全不同的类型事实：
+适配两个容器这个决定，改写了四个类型事实：
 
 | 名字 | `std::map` | `std::flat_map` |
 | --- | --- | --- |
@@ -81,7 +89,7 @@ class flat_map;
 
 ### `keys()` / `values()` / `extract()` / `replace()`
 
-这四个成员是"适配器"身份的体现，也是 `flat_map` 最好用和最容易被忽略的部分：
+这四个成员分两组：`keys()` / `values()` 是只读的窗口，`extract()` / `replace()` 是整块存储的进出。它们既是"适配器"身份的体现，也是 `flat_map` 最好用、最容易被忽略的部分：
 
 ```cpp
 const auto& ks = m.keys();      // const KeyContainer&，升序且与 values 同下标
@@ -95,6 +103,8 @@ m2.replace(std::move(cs.keys), std::move(cs.values));  // 直接换掉整块存�
 因为 `keys()` / `values()` 只给 `const` 引用，你没法绕过排序不变量去改键。想整体替换存储，只能走 `replace()`，由容器重新校验。
 
 ### 查找是二分，插入是搬移
+
+这一节把两件事放在一起讲，因为它们的代价来自同一个设计：数据躺在连续数组里，位置就是下标。先看图，再看查找为什么便宜、插入为什么贵。
 
 ```mermaid
 flowchart TB
@@ -123,6 +133,8 @@ flowchart TB
 
 ### 复杂度对照
 
+先把三种容器的代价并排放好，再说这张表该怎么读。
+
 | 操作 | `flat_map` | `map` | `unordered_map` |
 | --- | --- | --- | --- |
 | `find` / `count` / `contains` | `O(log n)`，缓存友好 | `O(log n)` | 平均 `O(1)` |
@@ -138,7 +150,7 @@ flowchart TB
 
 ### 迭代器与引用失效规则
 
-这是从 `map` 迁过来最容易踩的地方。`map` 的插入从不让任何迭代器失效，`flat_map` 恰恰相反：
+这是从 `map` 迁过来最容易踩的地方，也是整页最难的一块：难在规则不由操作本身决定，而是取决于运行期是否触发扩容。`map` 的插入从不让任何迭代器失效，`flat_map` 恰恰相反：
 
 | 操作 | 受影响范围 |
 | --- | --- |
@@ -150,6 +162,8 @@ flowchart TB
 保守写法：**任何时候调用了插入，把之前拿到的一切迭代器、指针、引用都当成作废。** 想跨插入持有元素，就存 key 本身，插入后再 `find` 一次。
 
 ## 常见坑
+
+八条坑按来源分三组：1、2 是失效规则的具体形态，3、4、5 是接口语义容易记错的地方，6、7、8 是构建、选型和错误处理上的判断。
 
 **1. `operator[]` 插入会重排，之前保存的引用全废。**
 
@@ -196,6 +210,8 @@ flat_map<K, V> c(std::sorted_unique, std::move(ks), std::move(vs)); // OK：两�
 
 ## 编译器支持
 
+这一节把"本机能不能用"落成可复核的记录：环境与特性宏、实测可用与缺失、跨编译器的判断。
+
 本机实测环境：
 
 | 项目 | 值 |
@@ -225,7 +241,7 @@ flat_map<K, V> c(std::sorted_unique, std::move(ks), std::move(vs)); // OK：两�
 - 按 key 的 `extract` 节点句柄——标准里本来就没有，`flat_map` 没有节点。
 - `<hive>` 与 `<inplace_vector>`（C++26）——两个头文件在本机 `-std=c++23` 和 `-std=c++26` 下都用 `__has_include` 探测为**不存在**。
 
-关于 C++26 的那两个容器，只做定位，本机没有头文件就不给示例：
+关于 C++26 的那两个容器，只做定位，本机没有头文件就不给示例。它们各自补上 `flat_map` 做不到的一件事：
 
 - **`std::inplace_vector<T, N>`**：容量在编译期固定、元素直接存在对象内部、完全不碰堆的"vector"。它是 `flat_map` 最自然的底层容器——当上限已知（比如嵌入式、固定大小的路由表），用它替换默认的 `vector` 就能让整个映射零分配。
 - **`std::hive`**：元素存在分段池里，插入删除 `O(1)` 且**元素地址稳定**，是"节点式"和"连续式"之间的折中。要同时满足"频繁插入"和"引用稳定"时它才是正确答案，`flat_map` 不行。
@@ -233,6 +249,8 @@ flat_map<K, V> c(std::sorted_unique, std::move(ks), std::move(vs)); // OK：两�
 `libstdc++` 和 MSVC STL 的版本门槛**本机未验证**（这台机器只有 libc++）。跨编译器时一律用上面的特性宏判断，别背版本号。更细的版本矩阵见 [编译器支持矩阵](/reference/compiler-support)。
 
 ## 与 learncpp 的关系
+
+这一节只做迁移对照：learncpp 默认成立、换到 `flat_map` 上不成立的是什么，以及要改哪几行。
 
 learncpp 的《STL containers overview》只做了分类：序列容器、关联容器、容器适配器，并说明关联容器按 `operator<` 自动排序。它没有给实现细节，也没有 flat 版本（C++23 才加进来）；这篇文章现在已经收进附录 D，标为弃用。
 
@@ -256,6 +274,8 @@ using table = std::flat_map<K, V>;   // 换成 std::map<K, V> 即可回退
 把 `keys()` 当普通连续区间用，还可以直接喂给 [span 与 mdspan](/stdlib/span) 交给 C 风格接口；把 `flat_map` 当 range 用，则可以直接接上 [ranges 与 views](/cpp20/ranges) 的 `filter` / `transform`，而且因为是顺序内存，pipeline 的效率比在 `map` 上跑高得多。
 
 ## 小练习
+
+五道练习对应三个难点：代价量化（1）、批量构建路径（2）、失效规则（3、4、5）。
 
 1. **量一次再下结论。** 造 100、1000、10000 三个规模，分别用 `std::map` 和 `std::flat_map` 存同样的键值，先全部插入再各做 10 万次随机 `find`，打印两边耗时。找出你这台机器上的交叉点大概在哪里。
 2. **批量构建的三条路。** 用同一份 `vector<pair<string, int>>`（含重复键），分别用：迭代器构造、`sorted_unique` 加迭代器构造、拆成两个 `vector` 再加 `sorted_unique` 构造。用 `keys()` 打印三者结果，确认内容一致，并解释为什么第三种最快。

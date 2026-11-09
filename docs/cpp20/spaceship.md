@@ -5,11 +5,13 @@ description: C++20 三路比较运算符 <=>：strong_ordering / weak_ordering /
 
 # 三路比较 <=>：一次写全六种比较
 
-`a <=> b` 一次算出三种结果：小于、相等、大于。再配上编译器对 `<` `>` `<=` `>=` 的**重写**，一个运算符就能顶过去六个手写的运算符。这页讲清它到底返回什么、`= default` 生成什么、哪些比较是白送的、哪些不是。
+`a <=> b` 一次算出三种结果：小于、相等、大于。再配上编译器对 `<` `>` `<=` `>=` 的**重写**，一个运算符就替代了六个手写版本。这页分四块讲：它返回什么、`= default` 生成什么、哪些比较是白送的、哪些不是。
 
 ## 动机：手写六个运算符容易写歪
 
-C++20 之前，让一个类型可比较有两条路。第一条是老老实实写六个运算符：
+C++20 之前，让一个类型可比较有两条路，各有代价；C++20 之后多了第三条，只需要一行。先看前两条。
+
+第一条是老老实实写六个运算符：
 
 ```cpp
 #include <tuple>
@@ -45,7 +47,7 @@ using namespace std::rel_ops;   // 得到 != > <= >=，但只在这个作用域�
 
 `rel_ops` 的问题很实在：它靠 `using namespace` 生效，作用域一扩散，所有类型都多出一堆模板候选；而且它补出来的运算符不会进入 ADL，别人在自己的命名空间里用你的类型时又得再 `using` 一次。
 
-C++20 之后，同样的事情变成一行：
+第三条路只写一行：
 
 ```cpp
 struct Point {
@@ -55,7 +57,7 @@ struct Point {
 };
 ```
 
-六个运算符全都有了，而且彼此一定一致，因为它们是同一个定义变出来的。
+六个运算符全都有了，而且彼此一定一致，因为它们是同一个定义变出来的。一个定义派生六个运算符，接下来看它返回什么、凭什么保持一致。
 
 ## 最小示例
 
@@ -78,15 +80,17 @@ nan <=> nan is unordered
 1.0 <=> 2.0 is less
 ```
 
-注意第 5、6 行：`Name` 的两套比较故意不一致——`<=>` 忽略大小写，`==` 区分大小写。这不是 bug，正是 `weak_ordering` 要表达的东西，后文展开。
+第 5、6 行故意让 `Name` 的两套比较不一致：`<=>` 忽略大小写，`==` 区分大小写。这种不一致正是 `weak_ordering` 要表达的东西，后文展开。
 
 页内其余代码块都是说明性片段，只有上面这份文件经过 `npm run verify` 的编译与输出比对。
 
 ## 机制与语义
 
+这一节分六块：三种返回类型、`= default` 的生成规则、重写规则、手写比较、concept 检查，以及和 `std::tie` 的对照。重写规则是最需要慢读的一块。
+
 ### 三种返回类型
 
-`operator<=>` 的返回值用来表达"能不能分出大小、能不能表示不可比"，标准库的做法是返回 `<compare>` 里的三种比较类别之一，它们各自能表示多少种结果：
+`operator<=>` 的返回值要表达两件事：能不能分出大小、能不能表示不可比。标准库的做法是返回 `<compare>` 里的三种比较类别（comparison category）之一，三者的区别在于能表示多少种结果：
 
 ```mermaid
 flowchart TB
@@ -173,7 +177,7 @@ error: cannot default 'operator<=>' because type 'std::strong_ordering' was not 
 | `a != b` | `!(a == b)` | 只要有 `==` 就有 `!=` |
 | `a == b` | 不重写 | 必须有 `operator==` |
 
-几个由此推出的结论：
+几个由此推出的结论，一共四条：
 
 - 只写 `<=>`，`<` `>` `<=` `>=` 全都能用，`std::sort`、`std::map`、`std::set` 开箱即用（它们只要求 `<`）。本页 snippet 里 `std::sort(points)` 就是这么工作的。
 - `==` 和 `!=` 是另一条线，来自 `operator==`。想让容器做等值查找（`std::find`、`unordered_map` 的 key），必须有 `==`，光有 `<=>` 不够。
@@ -222,7 +226,7 @@ private:
 };
 ```
 
-写法上有几条硬要求：
+写法上有五条硬要求：
 
 - 返回类型应当是比较类别（`strong_ordering` / `weak_ordering` / `partial_ordering`）。`= default` 的版本写别的类型，会在**被使用的地方**报错（默认的比较运算符是惰性实例化的，只声明不使用可以编过），因为它要先算出成员的类别再 `static_cast` 到你的返回类型。本机把返回类型写成 `bool` 并真的比较一次：
 
@@ -256,7 +260,7 @@ static_assert(!std::three_way_comparable<NoEq>);      // 不成立：== 被删�
 static_assert(std::three_way_comparable_with<std::string, const char*>);  // 本机 libc++ 23 为 true
 ```
 
-`three_way_comparable<T>` 要求 `T` 和 `T` 之间的六种比较都成立；`three_way_comparable_with<T, U>` 检查跨类型版本。它们**只检查语法**：能不能写出来、返回类型能不能转成类别，不检查你的比较逻辑和 `==` 是否语义一致。这一点是本页最值得记住的坑之一。
+`three_way_comparable<T>` 要求 `T` 和 `T` 之间的六种比较都成立；`three_way_comparable_with<T, U>` 检查跨类型版本。它们**只检查语法**：能不能写出来、返回类型能不能转成类别，不检查你的比较逻辑和 `==` 是否语义一致。最后一条坑会再讲一次这个盲区。
 
 把它当成模板的约束条件用，报错会落在调用点而不是实例化深处——这套思路和 [concepts 与 requires](/cpp20/concepts) 里讲的是同一套：
 
@@ -281,6 +285,8 @@ const T& smaller(const T& a, const T& b) { return b < a ? b : a; }
 `tie` 唯一还占优势的地方：它比较的是**你自己选的成员子集和顺序**。真要"按 id 比、忽略 name"，`= default` 做不到（它按声明顺序比全部），这时该写手写 `<=>`，而不是退回去写六个 `tie`。
 
 ## 常见坑
+
+七条坑依次关于浮点 NaN、`<=>` 与 `==` 的区别、指针顺序、返回类型、异构比较、强弱序误用和 concept 的盲区。
 
 ### 1. 浮点：`partial_ordering` 与 NaN
 
@@ -415,6 +421,8 @@ learncpp 第 21 章把运算符重载讲得很全：`operator==`、`operator!=`�
 如果你的类型要和 ranges 算法配合，`<=>` 带来的"排序与相等分开定义"的模式会更常见——`std::ranges::sort` 用 `<`（即 `<=>`），`std::ranges::unique` 和 `std::ranges::find` 用 `==`。两者语义一致时最省心，相关背景见 [ranges 与 views](/cpp20/ranges)。另外，C++23 的显式对象参数（deducing this）让"一个 `<=>` 同时服务 `const` / 非 `const` 对象"写起来更自然，见 [deducing this](/cpp23/deducing-this)。
 
 ## 小练习
+
+四个练习：一个验证返回类型，一个写手写比较，一个拆开弱序，最后一个替换 `tie`。
 
 1. **给三维点加 `<=>`**：写 `struct Vec3 { double x, y, z; auto operator<=>(const Vec3&) const = default; };`，用 `static_assert` 检查它的 `<=>` 返回类型是 `partial_ordering` 而不是 `strong_ordering`，并解释为什么。提示：`std::is_same_v<decltype(std::declval<Vec3>() <=> std::declval<Vec3>()), std::partial_ordering>`。
 2. **实现版本号比较**：`Version{major, minor, patch}`，手写 `<=>` 返回 `strong_ordering`，再补一个 `==`，验证 `std::sort` 与 `std::find` 都按预期工作。然后把 `==` 故意改成"只比 major"，观察 `std::find` 的结果怎么变。

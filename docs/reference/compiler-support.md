@@ -5,11 +5,15 @@ description: 按 C++20 / C++23 / C++26 分组的特性速查表，逐项对照�
 
 # 编译器支持矩阵
 
-这是一张长期维护的速查表：写代码之前先在这里查一眼，比踩了编译错误再回头翻 cppreference 快得多。
+这是一张长期维护的速查表：写代码之前先在这里查一眼，比编译失败之后再回头翻 cppreference 省时间。
 
 所有状态都是在本机真实执行 `clang++` 得到的结果，不是抄来的表格。复核日期：2026-11-05。
 
+本页先说这张表怎么得出的、一行怎么读，再按 C++20 / C++23 / C++26 三组给结果，最后给一套能自己复核的五步命令。
+
 ## 本机指纹
+
+这一节固定四行输出：编译器版本、目标平台、安装路径、标准库。
 
 ```text
 clang version 23.1.4 (msys2)
@@ -33,6 +37,8 @@ InstalledDir: D:/msys64/clang64/bin
 | `⚠️ 未验证` | 存在但本机没有实际验证，或者受编译选项、平台限制没跑通 |
 | `❌ 本机不可用` | 头文件缺失、宏未定义，或语言特性直接编译失败 |
 
+标记只覆盖本机实测的范围，不代表标准要求，也不代表别的工具链同样如此。
+
 一张图说清这张表是怎么得出的：
 
 ```mermaid
@@ -47,7 +53,7 @@ flowchart TB
 
 ## 怎么读一行
 
-以 `<expected>` 这一行为例：
+这一节只做一件事：拿一行当例子，把读法走一遍。以 `<expected>` 为例：
 
 ```text
 | <expected> | <expected> | __cpp_lib_expected = 202211 | ✅ 已验证 | and_then/transform/or_else 齐全 |
@@ -74,6 +80,8 @@ int main() {
 
 ## C++20
 
+这一组共 14 行，全部标注为已验证，是本机验证得最完整的一组。
+
 | 特性 | 头文件/关键字 | feature-test macro | 本机状态 | 备注 |
 | --- | --- | --- | --- | --- |
 | concepts | `<concepts>` / `concept` `requires` | `__cpp_concepts` = `202002` | ✅ 已验证 | 约束、`requires` 表达式、简写形式都可用 |
@@ -91,9 +99,11 @@ int main() {
 | `source_location` | `<source_location>` | `__cpp_lib_source_location` = `201907` | ✅ 已验证 | `std::source_location::current()` 在 `consteval` 里取行号正常 |
 | `bit_cast` | `<bit>` | `__cpp_lib_bit_cast` = `201806` | ✅ 已验证 | 要求 `sizeof` 相等、目标可平凡复制 |
 
-C++20 这一组在本机是完整的，写示例基本不会卡在编译器上。
+写示例基本不会卡在编译器上。
 
 ## C++23
+
+这一组共 17 行，分两类：13 行已验证，4 行是 libc++ 23 明确没实现。
 
 | 特性 | 头文件/关键字 | feature-test macro | 本机状态 | 备注 |
 | --- | --- | --- | --- | --- |
@@ -115,11 +125,13 @@ C++20 这一组在本机是完整的，写示例基本不会卡在编译器上�
 | `unreachable` | `<utility>` | `__cpp_lib_unreachable` = `202202` | ✅ 已验证 | 走到即 UB，只用来给优化器承诺 |
 | `byteswap` | `<bit>` | `__cpp_lib_byteswap` = `202110` | ✅ 已验证 | 默认字节序，不做条件交换 |
 
-本机这一组是“大部分有、少数硬缺”。缺的四个（`<generator>`、`views::chunk`、`move_only_function`、`<stacktrace>`）都是 libc++ 23 明确没实现的，不是编译选项问题——`<version>` 里对应的宏整行被注释掉了。
+缺的四个（`<generator>`、`views::chunk`、`move_only_function`、`<stacktrace>`）都是 libc++ 23 明确没实现的，不是编译选项问题——`<version>` 里对应的宏整行被注释掉了。
 
 顺带记录两个同样缺失、但不在必查清单里的东西：`std::ranges::starts_with` 和 `std::copyable_function` 都没有，别写出依赖它们的示例。
 
 ## C++26
+
+C++26 这一组 8 行里，6 行本机不可用；可用的两行都是语言特性，表里涉及的标准库头文件一个都没有。
 
 | 特性 | 头文件/关键字 | feature-test macro | 本机状态 | 备注 |
 | --- | --- | --- | --- | --- |
@@ -132,15 +144,15 @@ C++20 这一组在本机是完整的，写示例基本不会卡在编译器上�
 | `#embed` | `#embed` | 无宏；`__has_embed` 可用 | ✅ 已验证 | 能嵌入二进制并逐字节读出；clang 仍报 `-Wc23-extensions` 警告，说明按扩展实现 |
 | senders / receivers | `<execution>` / `std::execution` | 无（`__cpp_lib_senders` 未定义） | ❌ 本机不可用 | `<execution>` 里只有 C++17 的并行策略，没有 P2300 的 `sender`/`receiver`/`schedule` |
 
-需要特别记住的一句话：
+单独记这几条：
 
 > `<generator>`、`<hive>`、`<inplace_vector>`、`<simd>` 在本机没有头文件；reflection 与 contracts 在本机不支持。
 
-C++26 在本机基本处于“语言特性零散可用、标准库大面积缺席”的状态：表里 C++26 有 8 行，其中 6 行是本机不可用。除了 pack indexing 和 `#embed`，其余都要等工具链升级；别在文档里写“C++26 已支持”，会误导读者。
+除了 pack indexing 和 `#embed`，其余都要等工具链升级。别在文档里写“C++26 已支持”，会误导读者。
 
 ## 怎么自己确认
 
-表格会过期，命令不会。以下命令都在 PowerShell 里跑（工作目录任意）。
+表格会过期，命令不会。复核分五步，每一步只回答一个问题：语言宏、标准库宏、头文件在不在、`__has_include` 的结果、真正编译一次。以下命令都在 PowerShell 里跑（工作目录任意）。
 
 **第一步：看语言特性宏。** 这一步只给编译器内置宏，`__cpp_lib_*` 一个都不会出现：
 
@@ -204,19 +216,21 @@ clang++ -std=c++23 -Wall -Wextra -O0 demo.cpp -o $env:TEMP\demo.exe
 
 ## 陷阱：宏存在不等于实现完整
 
-这是这张表最容易被误读的地方，单独说清楚：
+这是这张表最容易被误读的地方，七条分开说：
 
-- **`__cpp_lib_ranges` = `202406` 不代表 ranges 全齐。** 本机 `views::chunk`、`views::slide`、`views::concat`、`views::cartesian_product` 全都编译不过，宏却照样报到 C++26 的修订号。聚合宏值大，只说明主体框架新。
-- **宏被注释掉才是死刑。** 打开 `<version>` 能看到 `__cpp_lib_move_only_function`、`__cpp_lib_ranges_chunk`、`__cpp_lib_stacktrace` 这三行是 `// # define ...`，libc++ 用注释明确表示“未实现”。看到 `#ifdef` 为假，就不用再试了。
-- **语言宏和库宏是两套东西。** `__cpp_pack_indexing` 有值只能说明编译器认得语法，不代表 `<ranges>` 之类配套库跟上了。
-- **`__cplusplus` 只到 `202400L`。** 别用 `>= 202600L` 判断“是不是 C++26”，会永远为假。
-- **`__has_include` 为真不等于能用。** 头文件可能只提供前置声明，或者相关 API 被 `_LIBCPP_STD_VER` 挡住。
-- **C++20 模式下的 C++23 语法会“半通”。** 比如 `if consteval` 能编译，但 clang 给出 `-Wc++23-extensions` 警告；加上 `-Werror` 就会失败。跨模式写示例时把这条记牢。
-- **“有这个 API”和“API 完整”是两件事。** 本机 `optional::or_else` 少了 `&` 与 `const&&` 重载，`span::at` 只在 C++26 模式出现，`mdspan` 只有 `data_handle()` 没有 `data()`。查到功能存在之后，还要按你实际要用的重载再编一次。
+- `__cpp_lib_ranges` = `202406` 不代表 ranges 全齐。本机 `views::chunk`、`views::slide`、`views::concat`、`views::cartesian_product` 全都编译不过，宏却照样报到 C++26 的修订号。聚合宏值大，只说明主体框架新。
+- 宏被注释掉才是死刑。打开 `<version>` 能看到 `__cpp_lib_move_only_function`、`__cpp_lib_ranges_chunk`、`__cpp_lib_stacktrace` 这三行是 `// # define ...`，libc++ 用注释明确表示"未实现"。看到 `#ifdef` 为假，就不用再试了。
+- 语言宏和库宏是两套东西。`__cpp_pack_indexing` 有值只能说明编译器认得语法，不代表 `<ranges>` 之类配套库跟上了。
+- `__cplusplus` 只到 `202400L`。别用 `>= 202600L` 判断"是不是 C++26"，会永远为假。
+- `__has_include` 为真不等于能用。头文件可能只提供前置声明，或者相关 API 被 `_LIBCPP_STD_VER` 挡住。
+- C++20 模式下的 C++23 语法会"半通"。比如 `if consteval` 能编译，但 clang 给出 `-Wc++23-extensions` 警告；加上 `-Werror` 就会失败。跨模式写示例时把这条记牢。
+- "有这个 API"和"API 完整"是两件事。本机 `optional::or_else` 少了 `&` 与 `const&&` 重载，`span::at` 只在 C++26 模式出现，`mdspan` 只有 `data_handle()` 没有 `data()`。查到功能存在之后，还要按你实际要用的重载再编一次。
 
 判断顺序建议固定成：**头文件在不在 → 宏有没有 → 最小示例能不能编译 → 跑出来的输出对不对**。四步都过了才标 `✅ 已验证`，只过前三步就标 `✅ 头文件可用`。
 
 ## 小练习
+
+五道练习，前四道对着本页的命令和表格做，最后一道是维护这张表。
 
 1. 用上面第二步的命令，把本机 `__cpp_lib_*` 全部导出，找出三个宏值最高（年份最新）的库特性，逐个写最小示例验证，看看有几个真能用。
 2. 写一个程序，用 `__has_include` 同时探测 `<flat_map>`、`<print>`、`<generator>`，并按结果选择不同的实现路径（比如没有 `<generator>` 时退回手写迭代器）。

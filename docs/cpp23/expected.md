@@ -5,13 +5,13 @@ description: "C++23 std::expected 的用法、单子操作与短路语义、和�
 
 # std::expected：把错误写进返回类型
 
-`std::expected<T, E>` 表示"要么是一个 `T`，要么是一个 `E`"，二者必居其一。它把"这次调用可能失败"从注释、文档和调用方的记忆里，搬进了函数签名。
+`std::expected<T, E>` 表示"要么是一个 `T`，要么是一个 `E`"，二者必居其一。它把"这次调用可能失败"这条信息，从注释、文档和调用方的记忆里搬进了函数签名。
 
-它不是为了取代异常，而是给**可预期的失败**（用户输入非法、文件不存在、端口被占用）一个零分配、可检查、能进 `noexcept` 函数的表达方式。
+它给可预期的失败（用户输入非法、文件不存在、端口被占用）一个零分配、可检查、能进 `noexcept` 函数的表达方式。异常并不因此退场，两者的分界在「和异常的分工」里单独讲。
 
 ## 动机：三种错误处理方式
 
-先看同一件事——把字符串解析成整数——用三种方式写，差别在哪。
+同一件事——把字符串解析成整数——有三种写法：抛异常、返回 `std::optional<T>`、返回 `std::expected<T, E>`。差别集中在下面七行。
 
 | | 异常 | `std::optional<T>` | `std::expected<T, E>` |
 | --- | --- | --- | --- |
@@ -23,17 +23,17 @@ description: "C++23 std::expected 的用法、单子操作与短路语义、和�
 | 控制流 | 非局部跳转 | 局部 | 局部 |
 | 适合 | 不可恢复、构造失败、契约违反 | "有没有"本身就足够 | 可预期、需要理由的失败 |
 
-三者的分界线其实很清楚：
+三条分界线按失败的性质划：
 
 - **`optional`** 回答"有没有"，不回答"为什么没有"。一旦你想打印或记录失败原因，它就不够了；`optional` 自己的链式写法见 [optional 的单子操作](/cpp23/optional-monadic)。
-- **异常** 是带外的、非局部的：它适合"这一层处理不了、也不该在这里处理"的情况，代价是失败路径在代码里不可见。
+- **异常** 是带外的、非局部的，适合"这一层处理不了、也不该在这里处理"的情况。代价是失败路径在代码里不可见。
 - **`expected`** 把错误变成普通的返回值：可以 `switch`、可以放进容器、可以逐层 `return` 上传，也可以在 `noexcept` 函数里用。
 
-如果你已经在用 range pipeline 把操作串起来（见 [ranges 与 views](/cpp20/ranges)），会发现 `expected` 的链式调用形式上很像——但它是**控制流**的串联，不是惰性求值的数据流。
+`expected` 的链式调用和 range pipeline（见 [ranges 与 views](/cpp20/ranges)）形式上很像，区别在语义：它是控制流的串联，不是惰性求值的数据流。
 
 ## 最小示例
 
-下面这个程序把"解析端口号 → 翻倍 → 加 2"串成一条链，并分别跑成功与失败两条路径：
+下面这个程序把"解析端口号 → 翻倍 → 加 2"串成一条链，成功与失败两条路径各跑一次。
 
 <<< @/snippets/cpp23/expected-basic.cpp
 
@@ -43,21 +43,23 @@ description: "C++23 std::expected 的用法、单子操作与短路语义、和�
 clang++ -std=c++23 -Wall -Wextra -O0 docs/snippets/cpp23/expected-basic.cpp -o $env:TEMP\expected-basic.exe
 ```
 
-输出里有三件事值得注意：
+输出只盯三件事：
 
 1. `[1]` 走通全链：`8080 → 16160 → 16162`。
 2. `[2]` 在 `and_then` 里失败：`transform` 那一步**根本没被调用**，错误原样上传。
 3. `[3]` 在第一步就失败：后面两步全被跳过，`value_or(1)` 给出兜底值而不抛异常。
 
-最后两段单独演示了两个坑：`value()` 在无值时抛 `std::bad_expected_access`，以及 `expected<void, E>` 怎么写。
+示例文件末尾的两段单独演示了两个坑：`value()` 在无值时抛 `std::bad_expected_access`，以及 `expected<void, E>` 怎么写。这两个点放到「机制与语义」里展开。
 
 ## 机制与语义
 
+这一节分五块：布局与构造、观察接口、单子操作、错误传播与短路、`expected<void, E>`。前两块是地基，第三块给出链式写法的全部机制，后两块各收一个特例。
+
 ### 布局与构造
 
-`expected` 内部是一个带判别位的联合体：`T` 和 `E` 占同一块存储，没有堆分配，`sizeof` 大致是 `max(sizeof(T), sizeof(E))` 加上对齐填充。它不继承任何基类，也不做类型擦除。
+`expected` 内部是一个带判别位的联合体，需要关心的只有两件事：内存怎么摆，值从哪条路径进来。`T` 和 `E` 占同一块存储，没有堆分配，`sizeof` 大致是 `max(sizeof(T), sizeof(E))` 加上对齐填充。它不继承任何基类，也不做类型擦除。
 
-构造方式：
+构造方式有五种：
 
 ```cpp
 std::expected<int, std::string> a = 42;                        // 直接给值
@@ -67,9 +69,11 @@ std::expected<int, std::string> d{std::unexpect, "bad"};       // 就地构造 E
 std::expected<int, std::string> e;                             // 默认构造：T 值初始化
 ```
 
-注意 `std::expected<int, std::string> e;` 是**成功**状态，值初始化为 `0`——前提是 `T` 可默认构造。如果 `T` 不可默认构造，这个默认构造函数就不参与重载。
+`std::expected<int, std::string> e;` 是**成功**状态，值初始化为 `0`——前提是 `T` 可默认构造。`T` 不可默认构造时，这个默认构造函数直接不参与重载。
 
 ### 观察接口
+
+取值和判断走六个入口，表格里一行对应一种写法。
 
 | 成员 | 语义 |
 | --- | --- |
@@ -80,11 +84,11 @@ std::expected<int, std::string> e;                             // 默认构造�
 | `value_or(fallback)` | 有值给值，无值给兜底，从不抛 |
 | `error_or(fallback)` | C++23：有错误给错误，有值给兜底 |
 
-`value_or` 在左值上要求 `T` 可拷贝，在右值上要求可移动。`value()` 和 `operator*` 的区别就是"运行期检查 + 抛异常"与"零检查、后果自负"。
+`value_or` 在左值上要求 `T` 可拷贝，在右值上要求可移动。`value()` 和 `operator*` 的差别在运行期行为：前者检查后抛异常，后者零检查，无值时是未定义行为（UB）。
 
 ### 单子操作（C++23）
 
-四个成员函数，把"成功继续、失败短路"这件事写成一行：
+四个成员函数解决同一件事：成功就继续，失败就短路，整条链写成一行。
 
 | 操作 | 传入的函数形状 | 结果类型 | 失败时 |
 | --- | --- | --- | --- |
@@ -93,9 +97,9 @@ std::expected<int, std::string> e;                             // 默认构造�
 | `or_else(f)` | `E → expected<T, G>` | `expected<T, G>` | 调用 `f`，用它的结果替换 |
 | `transform_error(f)` | `E → G` | `expected<T, G>` | 只改错误类型 |
 
-记忆方法：**`and_then` 接会失败的下一步，`transform` 接不会失败的一步**。如果 `transform` 的 lambda 返回了 `expected`，你会得到一个 `expected<expected<...>, E>`——嵌套两层，编译能过但语义错了，这是最常见的误用。
+记忆方法：**`and_then` 接会失败的下一步，`transform` 接不会失败的一步**。误用 `transform` 的症状很好认：它的 lambda 返回 `expected` 时，你得到的是 `expected<expected<...>, E>`，嵌套两层，编译能过但语义错了。这是本节最常出问题的地方。
 
-这些成员都有 `&`、`const&`、`&&`、`const&&` 四个引用限定重载，所以 `std::move(e).and_then(...)` 可以把值移进链里，避免拷贝。
+这四个成员都有 `&`、`const&`、`&&`、`const&&` 四个引用限定重载，所以 `std::move(e).and_then(...)` 可以把值移进链里，避免拷贝。
 
 ### 错误传播与短路
 
@@ -120,7 +124,7 @@ flowchart TD
 
 ### `expected<void, E>`
 
-有些操作只可能失败，没有返回值。这时用 `std::expected<void, E>`：成功时构造空的花括号，错误照常携带。
+有些操作只可能失败，没有返回值，这时用 `std::expected<void, E>`：成功时构造空的花括号，错误照常携带。
 
 ```cpp
 std::expected<void, std::string> flush();
@@ -133,22 +137,24 @@ if (!r) {
 return {};
 ```
 
-它没有 `value_or`（没有值可兜底），`value()` 的返回类型是 `void`、只在无值时抛 `bad_expected_access<void>`。判断成功用 `if (r)` / `if (!r)`，别靠 `value()`。
+它没有 `value_or`（没有值可兜底），`value()` 的返回类型是 `void`，只在无值时抛 `bad_expected_access<void>`。判断成功用 `if (r)` / `if (!r)`，别靠 `value()`。机制部分到这里讲完，下一节看它和异常各自的位置。
 
 ## 和异常的分工
 
-`expected` 和异常不是竞争关系，是**分层**关系。一条可操作的判据：
+`expected` 和异常是分层关系，分工由一条判据决定：
 
 - **可预期的失败** → `expected`。用户输入、文件格式、网络对端返回的码、查找不到、解析失败。这些失败是业务流程的一部分，调用方通常就在附近，能立刻处理。
 - **不可恢复的失败** → 异常。`new` 失败、构造失败（构造函数没有返回值可用）、契约违反（`at()` 越界）、`std::bad_alloc`。这些情况调用方通常无力处理，只想快速退出。
 - **跨 FFI / `noexcept` / `-fno-exceptions` 边界** → 只能 `expected` 或错误码。异常穿不过 C ABI，也穿不过 `noexcept` 函数的边界。
 
-两条实践建议：
+判据之外还有两条实践建议：
 
 1. **同一层接口只选一种。** 一个函数要么返回 `expected`，要么抛异常，不要"平时返回 `expected`、内部失败时抛"。混用会让调用方写两套错误处理。
 2. **`expected` 的错误也是数据，值得设计。** 与其塞一个 `std::string`，不如定义 `struct parse_error { std::error_code code; std::size_t offset; }`，让上层能分支处理而不是只能打印。打印错误用 `std::println` 即可，格式化细节见 [std::format 与 std::print](/cpp23/print-format)。
 
 ## 常见坑
+
+这一节收八条，都是编译或运行时能直接撞上的，每条给现象和落地做法。
 
 **1. `value()` 会抛，`operator*` 不会检查。** 无值时 `value()` 抛 `std::bad_expected_access<E>`（`expected<void, E>` 抛的是 `bad_expected_access<void>`）。`*e` 在无值时是 UB，且不会给你任何提示。不确定时用 `if` 或 `value_or`。
 
@@ -159,7 +165,7 @@ auto u = std::unexpected("bad");       // unexpected<const char*>，不是 unexp
 std::expected<int, std::string> e = u; // OK：const char* 可转换为 std::string
 ```
 
-构造 `expected<int, std::string>` 时它能转换过去，所以看起来没问题；但如果你把 `u` 存下来、和别的 `unexpected<std::string>` 比较，或把它传给模板参数，就会撞上类型不一致。
+构造 `expected<int, std::string>` 时它能转换过去，所以看起来没问题。但如果你把 `u` 存下来、和别的 `unexpected<std::string>` 比较，或把它传给模板参数，就会撞上类型不一致。
 
 **3. `expected` 不是 `variant`。** 它只有两个分支，`E` 是单一类型，没有 `index()`、没有 `visit()`、不能装第三个状态。需要"多个互斥状态"时用 `std::variant`；需要"错误码 + 上下文"时用一个聚合 `struct` 当 `E`，而不是把 `E` 写成 `variant<...>`。
 
@@ -174,6 +180,8 @@ std::expected<int, std::string> e = u; // OK：const char* 可转换为 std::str
 **8. `and_then` 里返回裸值编译不过。** 那个位置是 `transform`。报错通常长得吓人（一屏 `no matching function`），先检查返回类型是不是 `expected`。
 
 ## 编译器支持
+
+这一节给三样东西：本机实测的版本组合、三家实现的门槛、以及用特性宏兜底的写法。
 
 本机实测环境：
 

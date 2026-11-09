@@ -5,7 +5,7 @@ description: 用 concept 和 requires 表达式给模板加上编译期契约：
 
 # concepts 与 requires：让模板报错说人话
 
-模板的参数类型是"什么都能塞"的。塞错了，编译器不会在你的调用点骂你，而是先认真地实例化下去，直到某一行库代码里两个类型加不起来，才回头甩给你一屏 `in instantiation of ...`。concepts 解决的就是这件事：**把"这个类型得满足什么"从函数体深处提到签名上**，让不满足的类型在重载决议阶段就被挡掉。
+模板的参数类型是"什么都能塞"的。塞错了，编译器不会在调用点报错，而是先认真地实例化下去，直到某一行库代码里两个类型加不起来，才回头甩给你一屏 `in instantiation of ...`。concepts 把"这个类型得满足什么"从函数体深处提到签名上，让不满足的类型在重载决议阶段就被挡掉。
 
 ## 动机：报错发生在实例化深处
 
@@ -66,7 +66,7 @@ note: because 'v + v' would be invalid: invalid operands to binary expression
       ('NoAdd' and 'NoAdd')
 ```
 
-第一行就是你的调用点，最后一行直接说出缺什么。这就是"说人话"。
+第一行落在你的调用点，最后一行直接说出缺什么，中间没有标准库的实例化栈。
 
 ## 最小示例
 
@@ -93,6 +93,8 @@ print_num: 7
 注意 `kind(7)` 和 `kind(2.5)` 走了不同重载：两个版本都满足约束，但整型那个约束更强，于是赢了。这是后文的 subsumption。
 
 ## concept 与 requires 表达式
+
+concept 的定义只有一条语法，变数在 `requires` 表达式体内能写什么。这一节先看定义，再拆那四种要求。
 
 ### 定义一个 concept
 
@@ -122,6 +124,8 @@ static_assert(requires(int a, int b) { a + b; });   // true，int 能相加
 它**不求值**，只回答"这些表达式和类型在语法上成立吗"。所以 `requires` 里写 `a + b` 不会真的执行加法，也不会产生运行期开销。
 
 ### 四种要求
+
+`requires` 表达式体内能写四种东西，检查的力度各不相同。
 
 ```cpp
 template <typename T>
@@ -165,7 +169,7 @@ concept SizedRange = std::ranges::range<T> && requires(const T& c) {
 
 ## 约束函数模板与类模板
 
-约束可以写在这几个位置，效果等价：
+同一个约束有三个书写位置，效果等价；类模板上还能再单独约束某个成员：
 
 ```cpp
 // A. requires 子句：模板参数表之后，返回类型之前
@@ -202,7 +206,7 @@ private:
 };
 ```
 
-`Box<std::string>` 在写出来的那一刻就报错，而不是等到某次 `value_ += factor`。约束放在类上，等于给整个类模板签了一份契约。
+`Box<std::string>` 在写出来的那一刻就报错；等到某次 `value_ += factor` 才发现，位置已经离契约很远了。约束放在类上，等于给整个类模板签了一份契约。
 
 > C++23 的显式对象参数（deducing this）也能挂约束，`void f(this Self&& self) requires ...`。细节见 [deducing this](/cpp23/deducing-this)。
 
@@ -228,7 +232,7 @@ void mix(T first, std::integral auto second);  // 显式参数 + 隐式参数可
 
 ## 标准 concepts 一览
 
-`<concepts>` 和 `<iterator>` / `<ranges>` 里已经有一批常用货：
+`<concepts>` 和 `<iterator>` / `<ranges>` 里已经有一批现成的约束。最常打交道的五个在下面这张表，其余常见的列在表后。
 
 | concept | 含义 | 备注 |
 | --- | --- | --- |
@@ -256,7 +260,7 @@ static_assert(!std::convertible_to<void*, int*>);       // void* 不能隐式转
 
 ## 重载与 subsumption
 
-当多个候选都满足约束时，编译器按**约束的强弱**做偏序（partial ordering by constraints）：如果 A 的约束蕴含 B 的约束，就说 A 更受约束，A 优先。
+subsumption 是这一页最绕的部分，绕在它比较的是约束的写法，不是约束的含义。当多个候选都满足约束时，编译器按**约束的强弱**做偏序（partial ordering by constraints）：如果 A 的约束蕴含 B 的约束，就说 A 更受约束，A 优先。
 
 ```cpp
 template <typename T>
@@ -295,6 +299,8 @@ flowchart TD
 实践建议：**把可复用的约束命名成 concept**，用 `&&` 组合，让 subsumption 有结构可循。
 
 ## 常见坑
+
+七条都是语法或语义上的边界。前六条各有对应的改法，最后一条只能靠拆约束缓解。
 
 ### 1. concept 不是类型
 
@@ -376,7 +382,7 @@ concept HasSize2 = requires(T a) { a.size(); };
 static_assert(!HasSize2<int>);   // 对：替换 T = int 失败，得到 false
 ```
 
-本机 clang 的实测行为就是这样：`requires(int a) { a.size(); }` 会在 `a.size()` 处直接报 `member reference base type 'int' is not a structure or union`。这不是 bug，是标准语义。
+本机 clang 的实测行为就是这样：`requires(int a) { a.size(); }` 会在 `a.size()` 处直接报 `member reference base type 'int' is not a structure or union`。标准在这里要求的就是硬错误。
 
 ### 6. `same_as` 比你想的严格
 
@@ -394,7 +400,7 @@ void g(T);            // f 的宽松版
 
 ### 7. 约束失败时，报错仍可能很长
 
-候选多的时候，编译器会把每个候选为什么被淘汰都列出来。这不代表 concept 没用，而是提示你：**把大约束拆成小块并命名**。`requires Sortable<T> && Copyable<T> && Loggable<T>` 的诊断，永远比一坨内联表达式好读。
+候选多的时候，编译器会把每个候选为什么被淘汰都列出来，长度取决于候选数和每条约束的写法。要压住这段输出，办法是**把大约束拆成小块并命名**：`requires Sortable<T> && Copyable<T> && Loggable<T>` 的诊断，永远比一坨内联表达式好读。
 
 ## 编译器支持
 
